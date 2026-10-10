@@ -44,6 +44,10 @@ jobs:
           key: playwright-${{ hashFiles('e2e/package-lock.json') }}
       - run: npm ci
         working-directory: e2e
+      # webServer 会在 ../web 里执行 `npm run build && npm run preview`，
+      # e2e 目录的 npm ci 不会装 web 的依赖
+      - run: npm ci
+        working-directory: web
       - run: npx playwright install chromium --with-deps
         working-directory: e2e
       - run: npx playwright test
