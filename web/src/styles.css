@@ -279,6 +279,126 @@ body {
   font-size: 12px;
 }
 
+/* ---------- Publish ---------- */
+.pub-overlay {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+  z-index: 30;
+}
+
+.pub-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 420px;
+  padding: 20px;
+  width: 90%;
+}
+
+.pub-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.pub-head h2 {
+  font-size: 16px;
+  margin: 0;
+}
+
+.pub-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.pub-qr {
+  align-self: center;
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.pub-link-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.pub-link {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  padding: 8px 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pub-link-row button,
+.pub-primary {
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+
+.pub-primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.pub-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.pub-history {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 10px 0 0;
+}
+
+.pub-history li {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 10px;
+}
+
+.pub-version {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  padding: 2px 8px;
+}
+
+.pub-history time {
+  color: var(--text-dim);
+}
+
 /* ---------- Timeline ---------- */
 .timeline {
   display: flex;

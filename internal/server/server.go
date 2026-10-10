@@ -72,6 +72,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("POST /api/sessions/{id}/chat", s.handleChat)
+	mux.HandleFunc("POST /api/sessions/{id}/publish", s.handlePublish)
+	mux.HandleFunc("GET /api/sessions/{id}/publish", s.handleGetPublishes)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
@@ -328,6 +330,59 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.pipeline.EmitUserMessage(id, msg)
 	s.runPipeline(id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
+}
+
+// handlePublish rebuilds the dist and records one 发布 (Publish): the
+// public, credential-free URL /app/{id}/ now serves this version.
+func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, err := s.store.Load(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.Status == "building" {
+		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
+		return
+	}
+	appDir, err := s.appDir(id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := os.Stat(appDir); err != nil {
+		writeError(w, http.StatusBadRequest, "no app to publish yet")
+		return
+	}
+	ws, err := s.workspaceDir(id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	distDir := filepath.Join(ws, "dist")
+	if err := s.builder.Build(appDir, distDir); err != nil {
+		// Never leave a stale dist under the public URL after a failed
+		// publish; /app 404s until the next successful build/publish.
+		_ = os.RemoveAll(distDir)
+		writeError(w, http.StatusInternalServerError, "rebuild failed: "+err.Error())
+		return
+	}
+	pub, err := s.store.RecordPublish(id, "/app/"+id+"/")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, pub)
+}
+
+// handleGetPublishes returns the full publish history, oldest first.
+func (s *Server) handleGetPublishes(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.Load(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"publishes": sess.Publishes})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {

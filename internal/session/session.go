@@ -32,6 +32,15 @@ type Session struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 	Events    []Event   `json:"events"`
 	Messages  []Message `json:"messages"`
+	Publishes []Publish `json:"publishes"`
+}
+
+// Publish is one 发布 (Publish) of the session's built app: a versioned,
+// publicly reachable snapshot of /app/{id}/.
+type Publish struct {
+	Version int       `json:"version"`
+	URL     string    `json:"url"`
+	At      time.Time `json:"at"`
 }
 
 // Message is one user or agent utterance inside the session timeline. The
@@ -185,6 +194,23 @@ func (s *Store) SetStatus(id, status string) error {
 	}
 	sess.Status = status
 	return s.saveLocked(sess)
+}
+
+// RecordPublish appends one publish entry, assigning the next version
+// (1-based, gapless) under the store lock.
+func (s *Store) RecordPublish(id, url string) (Publish, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(id)
+	if err != nil {
+		return Publish{}, err
+	}
+	pub := Publish{Version: len(sess.Publishes) + 1, URL: url, At: time.Now()}
+	sess.Publishes = append(sess.Publishes, pub)
+	if err := s.saveLocked(sess); err != nil {
+		return Publish{}, err
+	}
+	return pub, nil
 }
 
 func newID() (string, error) {

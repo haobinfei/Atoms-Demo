@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { chatSession, getSession, openEventStream, type Session, type SessionEvent } from './api'
 import FilesDrawer from './FilesDrawer'
 import Preview from './Preview'
+import PublishPanel from './PublishPanel'
 import Timeline from './Timeline'
 
 const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主题改成橙色']
@@ -17,6 +18,7 @@ export default function Workspace({
   const [events, setEvents] = useState<SessionEvent[]>([])
   const [builtAt, setBuiltAt] = useState('')
   const [filesOpen, setFilesOpen] = useState(false)
+  const [publishOpen, setPublishOpen] = useState(false)
   const [chatText, setChatText] = useState('')
   const [sending, setSending] = useState(false)
   const [chatError, setChatError] = useState(false)
@@ -88,6 +90,9 @@ export default function Workspace({
           <div className={`ws-status ws-status-${session?.status ?? 'building'}`}>{statusLabel}</div>
         </div>
         <div className="ws-actions">
+          <button disabled={session?.status === 'building'} onClick={() => setPublishOpen(true)}>
+            发布
+          </button>
           <button onClick={() => setFilesOpen(true)}>代码</button>
           <a className="ws-export" href={`/api/sessions/${sessionId}/export`} download>
             导出
@@ -137,6 +142,9 @@ export default function Workspace({
         </main>
       </div>
       <FilesDrawer sessionId={sessionId} open={filesOpen} onClose={() => setFilesOpen(false)} />
+      {publishOpen && (
+        <PublishPanel sessionId={sessionId} onClose={() => setPublishOpen(false)} />
+      )}
     </div>
   )
 }

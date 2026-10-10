@@ -48,6 +48,25 @@ export async function chatSession(id: string, message: string): Promise<void> {
   if (!resp.ok) throw new Error(`chat: ${resp.status}`)
 }
 
+export interface Publish {
+  version: number
+  url: string
+  at: string
+}
+
+export async function publishSession(id: string): Promise<Publish> {
+  const resp = await fetch(`/api/sessions/${id}/publish`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`publish: ${resp.status}`)
+  return (await resp.json()) as Publish
+}
+
+export async function getPublishes(id: string): Promise<Publish[]> {
+  const resp = await fetch(`/api/sessions/${id}/publish`)
+  if (!resp.ok) throw new Error(`get publishes: ${resp.status}`)
+  const data = (await resp.json()) as { publishes: Publish[] }
+  return data.publishes
+}
+
 export function openEventStream(id: string, after: number): EventSource {
   return new EventSource(`/api/sessions/${id}/events?after=${after}`)
 }
