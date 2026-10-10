@@ -102,6 +102,9 @@ func (p *Pipeline) Run(ctx context.Context, id string) {
 			appDir := filepath.Join(p.Store.Workspace(id), "app")
 			distDir := filepath.Join(p.Store.Workspace(id), "dist")
 			if err := p.Builder.Build(appDir, distDir); err != nil {
+				// Drop any stale dist so /app never serves an outdated build
+				// while the session is failed.
+				_ = os.RemoveAll(distDir)
 				status = "failed"
 				fail(err)
 			}

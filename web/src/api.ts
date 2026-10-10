@@ -49,7 +49,7 @@ export async function listFiles(id: string): Promise<FileEntry[]> {
 }
 
 export async function getFile(id: string, path: string): Promise<{ path: string; content: string }> {
-  const resp = await fetch(`/api/sessions/${id}/file/${path}`)
+  const resp = await fetch(`/api/sessions/${id}/file/${encodeURIComponent(path)}`)
   if (!resp.ok) throw new Error(`get file: ${resp.status}`)
   return (await resp.json()) as { path: string; content: string }
 }

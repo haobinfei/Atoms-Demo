@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getFile, listFiles, type FileEntry } from './api'
 
 export default function FilesDrawer({
@@ -14,6 +14,13 @@ export default function FilesDrawer({
   const [active, setActive] = useState<string | null>(null)
   const [content, setContent] = useState('')
   const [copied, setCopied] = useState(false)
+  const copyTimer = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current !== null) clearTimeout(copyTimer.current)
+    }
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -22,7 +29,18 @@ export default function FilesDrawer({
 
   useEffect(() => {
     if (!active) return
-    void getFile(sessionId, active).then((f) => setContent(f.content))
+    let stale = false
+    setContent('')
+    void getFile(sessionId, active)
+      .then((f) => {
+        if (!stale) setContent(f.content)
+      })
+      .catch(() => {
+        if (!stale) setContent('// 加载失败')
+      })
+    return () => {
+      stale = true
+    }
   }, [active, sessionId])
 
   if (!open) return null
@@ -30,7 +48,8 @@ export default function FilesDrawer({
   const copy = async () => {
     await navigator.clipboard.writeText(content)
     setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+    if (copyTimer.current !== null) clearTimeout(copyTimer.current)
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1500)
   }
 
   return (

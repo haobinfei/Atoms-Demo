@@ -87,8 +87,14 @@ func (b *Builder) rewriteIndex(appDir, distDir string) error {
 	}
 	if _, err := os.Stat(filepath.Join(distDir, entryCSS)); err == nil &&
 		!strings.Contains(html, entryCSS) {
-		html = strings.Replace(html, "</head>",
-			`<link rel="stylesheet" href="./`+entryCSS+`" /></head>`, 1)
+		link := `<link rel="stylesheet" href="./` + entryCSS + `" />`
+		if strings.Contains(html, "</head>") {
+			html = strings.Replace(html, "</head>", link+"</head>", 1)
+		} else if strings.Contains(html, "</body>") {
+			html = strings.Replace(html, "</body>", link+"</body>", 1)
+		} else {
+			html += link
+		}
 	}
 	return os.WriteFile(filepath.Join(distDir, "index.html"), []byte(html), 0o644)
 }

@@ -79,13 +79,22 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// appDir returns the session's generated-app directory after validating the
-// id is a plain workspace folder name (no traversal).
-func (s *Server) appDir(id string) (string, error) {
+// workspaceDir validates the id is a plain workspace folder name (no
+// traversal) and returns the session's workspace directory.
+func (s *Server) workspaceDir(id string) (string, error) {
 	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
 		return "", fmt.Errorf("invalid id")
 	}
-	return filepath.Join(s.store.Workspace(id), "app"), nil
+	return s.store.Workspace(id), nil
+}
+
+// appDir returns the session's generated-app directory.
+func (s *Server) appDir(id string) (string, error) {
+	ws, err := s.workspaceDir(id)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(ws, "app"), nil
 }
 
 // safeJoin resolves a user-supplied relative path inside root, refusing
@@ -108,11 +117,12 @@ func safeJoin(root, rel string) (string, error) {
 // (later) the published URL. Publicly accessible, no auth.
 func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
-		writeError(w, http.StatusBadRequest, "invalid id")
+	ws, err := s.workspaceDir(id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dist := filepath.Join(s.store.Workspace(id), "dist")
+	dist := filepath.Join(ws, "dist")
 	rel := r.PathValue("path")
 	full := filepath.Join(dist, rel)
 	if rel == "" {
@@ -139,7 +149,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 		Size int    `json:"size"`
 	}
-	var out []entry
+	out := make([]entry, 0)
 	err = filepath.WalkDir(appDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -216,9 +226,11 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		defer src.Close()
-		_, err = io.Copy(f, src)
-		return err
+		if _, err := io.Copy(f, src); err != nil {
+			_ = src.Close()
+			return err
+		}
+		return src.Close()
 	})
 	if err != nil {
 		return // headers already written; nothing graceful left
