@@ -9,6 +9,7 @@ export default function App() {
   )
   const [user, setUser] = useState<string | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
+  const [homeView, setHomeView] = useState<'new' | 'projects'>('new')
 
   // Login gate: without a valid AuthSphere session the API answers 401 and
   // the browser is sent to the authorize page; the callback returns here
@@ -48,6 +49,8 @@ export default function App() {
   return (
     <Home
       user={user ?? ''}
+      view={homeView}
+      onViewChange={setHomeView}
       onCreated={(id) => {
         setSessionId(id)
         history.pushState(null, '', `?s=${id}`)

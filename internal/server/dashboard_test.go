@@ -85,10 +85,16 @@ func TestDashboardLifecycle(t *testing.T) {
 		t.Fatal("session 2 category mismatch")
 	}
 
-	// Search matches name/prompt and filters out the rest.
+	// Rename id1 so its name no longer contains the prompt words; search
+	// then proves the prompt branch matches, not just the name branch.
+	postJSON(t, ts.URL+"/api/sessions/"+id1+"/rename", map[string]string{"name": "街角小店"}, 200)
 	hits := listSessions(t, ts.URL, "咖啡")
 	if len(hits) != 1 || hits[0].ID != id1 {
 		t.Fatalf("search 咖啡 = %+v", hits)
+	}
+	byName := listSessions(t, ts.URL, "街角")
+	if len(byName) != 1 || byName[0].ID != id1 {
+		t.Fatalf("search 街角 = %+v", byName)
 	}
 	if n := len(listSessions(t, ts.URL, "不存在的词")); n != 0 {
 		t.Fatalf("search miss len = %d, want 0", n)
@@ -121,8 +127,12 @@ func TestDashboardLifecycle(t *testing.T) {
 		t.Fatalf("pinned first = %+v", pinned[0])
 	}
 
+	// Publish once: the duplicate must NOT inherit publish records (its
+	// public URL is id-based), while the original keeps its history.
+	publish(t, ts.URL, id2)
+
 	// Duplicate: appears in the list with a copy name and serves its own
-	// public URL immediately (files are copied).
+	// public URL immediately (files are copied), history travels along.
 	dupResp, err := http.Post(ts.URL+"/api/sessions/"+id2+"/duplicate", "application/json", nil)
 	if err != nil {
 		t.Fatalf("duplicate: %v", err)
@@ -140,6 +150,28 @@ func TestDashboardLifecycle(t *testing.T) {
 	dupSum := findSummary(t, listSessions(t, ts.URL, ""), dup.SessionID)
 	if dupSum.Name != "副本 · 运营周报看板" || dupSum.Category != "dashboard" {
 		t.Fatalf("duplicate summary = %+v", dupSum)
+	}
+	if n := len(publishHistory(t, ts.URL, dup.SessionID)); n != 0 {
+		t.Fatalf("duplicate publish history len = %d, want 0", n)
+	}
+	if n := len(publishHistory(t, ts.URL, id2)); n != 1 {
+		t.Fatalf("original publish history len = %d, want 1", n)
+	}
+	dupSess, err := http.Get(ts.URL + "/api/sessions/" + dup.SessionID)
+	if err != nil {
+		t.Fatalf("get duplicate: %v", err)
+	}
+	var dupFull struct {
+		Messages []any `json:"messages"`
+		Events   []any `json:"events"`
+	}
+	if err := json.NewDecoder(dupSess.Body).Decode(&dupFull); err != nil {
+		t.Fatalf("decode duplicate: %v", err)
+	}
+	dupSess.Body.Close()
+	if len(dupFull.Messages) != 2 || len(dupFull.Events) != 7 {
+		t.Fatalf("duplicate history = %d messages, %d events; want 2/7",
+			len(dupFull.Messages), len(dupFull.Events))
 	}
 	app, err := http.Get(fmt.Sprintf("%s/app/%s/", ts.URL, dup.SessionID))
 	if err != nil {
@@ -164,7 +196,8 @@ func TestDashboardLifecycle(t *testing.T) {
 		t.Fatalf("delete status = %d, want 200", delResp.StatusCode)
 	}
 	rest := listSessions(t, ts.URL, "")
-	if len(rest) != 2 { // id2 + its duplicate
+	// id2 and its duplicate survive.
+	if len(rest) != 2 {
 		t.Fatalf("list after delete len = %d, want 2", len(rest))
 	}
 	gone, err := http.Get(ts.URL + "/api/sessions/" + id1)
@@ -196,4 +229,24 @@ func TestDashboardLifecycle(t *testing.T) {
 		t.Fatalf("duplicate missing status = %d, want 404", dupMissing.StatusCode)
 	}
 	postJSON(t, ts.URL+"/api/sessions/"+id2+"/rename", map[string]string{"name": "  "}, 400)
+
+	// Duplicating a session that is still building must not strand the
+	// copy in "building" (no pipeline owns it): it normalizes to "failed",
+	// and the first chat turn regenerates it.
+	id3 := createSession(t, ts.URL, "一个待办小工具")
+	dupBuildResp, err := http.Post(ts.URL+"/api/sessions/"+id3+"/duplicate", "application/json", nil)
+	if err != nil {
+		t.Fatalf("duplicate building: %v", err)
+	}
+	var dupBuild struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.NewDecoder(dupBuildResp.Body).Decode(&dupBuild); err != nil {
+		t.Fatalf("decode duplicate building: %v", err)
+	}
+	dupBuildResp.Body.Close()
+	buildSum := findSummary(t, listSessions(t, ts.URL, ""), dupBuild.SessionID)
+	if buildSum.Status != "failed" {
+		t.Fatalf("duplicate of building session status = %q, want failed", buildSum.Status)
+	}
 }

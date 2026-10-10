@@ -270,7 +270,9 @@ func (s *Store) RecordPublish(owner, id, url string) (Publish, error) {
 }
 
 // List returns all sessions of one owner: pinned first, then newest
-// update first.
+// update first. Reading every session.json under the single store lock is
+// a deliberate tradeoff at demo scale — do not copy this pattern onto a
+// high-traffic path.
 func (s *Store) List(owner string) ([]Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -323,6 +325,9 @@ func (s *Store) update(owner, id string, mutate func(*Session)) error {
 		return err
 	}
 	mutate(sess)
+	// Metadata edits (rename/pin) count as modifications for the
+	// dashboard's 修改时间.
+	sess.UpdatedAt = time.Now()
 	return s.saveLocked(sess)
 }
 
@@ -340,13 +345,20 @@ func (s *Store) Duplicate(owner, id string) (*Session, error) {
 		return nil, err
 	}
 	now := time.Now()
+	// A copy has no pipeline running: inheriting "building" would strand
+	// it forever (BeginTurn refuses to start on a building session).
+	// Normalize to "failed" so the first chat turn regenerates everything.
+	status := src.Status
+	if status == "building" {
+		status = "failed"
+	}
 	dst := &Session{
 		ID:        newID,
 		Owner:     owner,
 		Name:      "副本 · " + src.Name,
 		Category:  src.Category,
 		Prompt:    src.Prompt,
-		Status:    src.Status,
+		Status:    status,
 		CreatedAt: now,
 		UpdatedAt: now,
 		Messages:  src.Messages,
@@ -364,6 +376,8 @@ func (s *Store) Duplicate(owner, id string) (*Session, error) {
 	}
 	// Best-effort copy of the generated app and dist so the copy previews
 	// immediately; a missed file only means the next turn rebuilds it.
+	// Copying while holding the store lock blocks every writer for the
+	// duration; accepted at demo scale (see List).
 	for _, sub := range []string{"app", "dist"} {
 		_ = copyDirTree(filepath.Join(s.Workspace(owner, id), sub), filepath.Join(s.Workspace(owner, newID), sub))
 	}
@@ -380,6 +394,8 @@ func (s *Store) Delete(owner, id string) error {
 	if _, err := s.loadLocked(owner, id); err != nil {
 		return err
 	}
+	// Two-phase, non-atomic by design: if the index removal fails the
+	// workspace is already gone, so /app/{id}/ 404s either way.
 	if err := os.RemoveAll(s.Workspace(owner, id)); err != nil {
 		return err
 	}

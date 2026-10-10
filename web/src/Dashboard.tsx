@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   deleteSession,
   duplicateSession,
@@ -29,17 +29,28 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
   const [error, setError] = useState(false)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameText, setRenameText] = useState('')
+  const reqSeq = useRef(0)
+  const committingRef = useRef(false)
 
+  // The sequence guard discards stale list responses: searching types
+  // fast, and a slow earlier response must not overwrite a newer list.
   const refresh = useCallback((q: string) => {
-    listSessions(q)
-      .then(setSessions)
-      .catch((err) => {
+    const seq = ++reqSeq.current
+    listSessions(q).then(
+      (list) => {
+        if (seq !== reqSeq.current) return
+        setSessions(list)
+        setError(false)
+      },
+      (err) => {
+        if (seq !== reqSeq.current) return
         if (isAuthError(err)) {
           redirectToLogin()
           return
         }
         setError(true)
-      })
+      },
+    )
   }, [])
 
   useEffect(() => {
@@ -56,6 +67,12 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
   }
 
   async function doRename(sess: SessionSummary) {
+    // onBlur and onSubmit can both fire in the same tick; commit once.
+    if (committingRef.current) return
+    committingRef.current = true
+    setTimeout(() => {
+      committingRef.current = false
+    }, 0)
     const name = renameText.trim()
     setRenaming(null)
     if (!name || name === sess.name) return

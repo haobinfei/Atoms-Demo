@@ -265,6 +265,47 @@ func TestUserIsolation(t *testing.T) {
 		t.Fatalf("foreign list len = %d, want 0", len(listOut.Sessions))
 	}
 
+	// Dashboard write operations are owner-scoped as well: user-b mutating
+	// user-a's session gets a plain 404.
+	bToken := e.token(t, "user-b")
+	postTo := func(path, body string) int {
+		req, err := http.NewRequest(http.MethodPost, e.ts.URL+"/api/sessions/"+out.SessionID+path,
+			strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("build %s: %v", path, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+bToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := postTo("/rename", `{"name":"劫持"}`); code != http.StatusNotFound {
+		t.Fatalf("foreign rename status = %d, want 404", code)
+	}
+	if code := postTo("/pin", `{"pinned":true}`); code != http.StatusNotFound {
+		t.Fatalf("foreign pin status = %d, want 404", code)
+	}
+	if code := postTo("/duplicate", ""); code != http.StatusNotFound {
+		t.Fatalf("foreign duplicate status = %d, want 404", code)
+	}
+	delReq, err := http.NewRequest(http.MethodDelete, e.ts.URL+"/api/sessions/"+out.SessionID, nil)
+	if err != nil {
+		t.Fatalf("build foreign delete: %v", err)
+	}
+	delReq.Header.Set("Authorization", "Bearer "+bToken)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("foreign delete: %v", err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("foreign delete status = %d, want 404", delResp.StatusCode)
+	}
+
 	// user-a can read it; user-b gets a plain 404 (no existence leak).
 	own := getWithToken(t, e.ts.URL+"/api/sessions/"+out.SessionID, e.token(t, "user-a"))
 	own.Body.Close()

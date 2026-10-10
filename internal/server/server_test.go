@@ -77,4 +77,8 @@ func TestCreateSessionPersistsWorkspace(t *testing.T) {
 	if sess.ID != out.SessionID || sess.Prompt != "一家咖啡店的电商网站" || sess.Status != "building" {
 		t.Fatalf("unexpected session: %+v", sess)
 	}
+
+	// The pipeline runs asynchronously; wait for it so the workspace
+	// cleanup cannot race in-flight writes.
+	readSSEUntilDone(t, ts.URL+"/api/sessions/"+out.SessionID+"/events", 0, 40)
 }

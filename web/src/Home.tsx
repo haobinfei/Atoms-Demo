@@ -11,15 +11,18 @@ const EXAMPLES = [
 
 export default function Home({
   user,
+  view,
+  onViewChange,
   onCreated,
 }: {
   user: string
+  view: 'new' | 'projects'
+  onViewChange: (view: 'new' | 'projects') => void
   onCreated: (id: string) => void
 }) {
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [view, setView] = useState<'new' | 'projects'>('new')
 
   const submit = async (text: string) => {
     if (!text.trim() || busy) return
@@ -37,10 +40,10 @@ export default function Home({
     <div className="home">
       <div className="home-user">{user}</div>
       <nav className="home-tabs">
-        <button className={view === 'new' ? 'on' : ''} onClick={() => setView('new')}>
+        <button className={view === 'new' ? 'on' : ''} onClick={() => onViewChange('new')}>
           新建项目
         </button>
-        <button className={view === 'projects' ? 'on' : ''} onClick={() => setView('projects')}>
+        <button className={view === 'projects' ? 'on' : ''} onClick={() => onViewChange('projects')}>
           我的项目
         </button>
       </nav>
