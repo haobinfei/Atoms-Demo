@@ -19,6 +19,7 @@ export default function Workspace({
   const [filesOpen, setFilesOpen] = useState(false)
   const [chatText, setChatText] = useState('')
   const [sending, setSending] = useState(false)
+  const [chatError, setChatError] = useState(false)
   const seenRef = useRef(0)
   const busy = (session?.status ?? 'building') === 'building' || sending
 
@@ -61,6 +62,7 @@ export default function Workspace({
     const msg = text.trim()
     if (!msg || busy) return
     setSending(true)
+    setChatError(false)
     try {
       await chatSession(sessionId, msg)
       setChatText('')
@@ -68,6 +70,7 @@ export default function Workspace({
       // the status immediately so the UI feels responsive.
       setSession((prev) => (prev ? { ...prev, status: 'building' } : prev))
     } catch (err) {
+      setChatError(true)
       console.error('chat turn failed', err)
     } finally {
       setSending(false)
@@ -126,6 +129,7 @@ export default function Workspace({
                 发送
               </button>
             </form>
+            {chatError && <div className="ws-chat-error">发送失败，请稍后重试</div>}
           </div>
         </aside>
         <main className="ws-preview">

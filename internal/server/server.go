@@ -301,25 +301,27 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "message is required")
 		return
 	}
-	sess, err := s.store.Load(id)
-	if err != nil {
+	if _, err := s.store.Load(id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if sess.Status == "building" {
-		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
+	// BeginTurn serializes concurrent chat requests atomically; without it
+	// two racing POSTs could both pass a plain status check and interleave
+	// two pipelines on one session.
+	prev, ok, err := s.store.BeginTurn(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Order matters: the session copy below predates the new message, so
-	// the status write must happen before AppendMessage, and each step
-	// re-loads — a stale Save here would silently drop the message.
-	sess.Status = "building"
-	if err := s.store.Save(sess); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !ok {
+		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
 		return
 	}
 	msg := session.Message{Role: "user", Content: strings.TrimSpace(req.Message), At: time.Now()}
 	if err := s.store.AppendMessage(id, msg); err != nil {
+		// The session is "building" but no pipeline owns it; roll back so
+		// the next request is not rejected forever.
+		_ = s.store.SetStatus(id, prev)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -345,6 +347,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribe before replaying: events published between the load and the
+	// subscription would otherwise fall into a gap (neither replayed nor
+	// streamed). Seq dedup below collapses any overlap.
+	ch := s.broker.Subscribe(id)
+	defer s.broker.Unsubscribe(id, ch)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -354,7 +362,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	maxSeq := after
 	writeEvent := func(ev session.Event) {
+		if ev.Seq <= maxSeq {
+			return // already replayed (subscribe-before-load overlap)
+		}
+		maxSeq = ev.Seq
 		data, _ := json.Marshal(ev)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
@@ -362,14 +375,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Replay persisted history the client has not seen yet.
 	for _, ev := range sess.Events {
-		if ev.Seq > after {
-			writeEvent(ev)
-		}
+		writeEvent(ev)
 	}
 
 	// Stream live events until the client goes away.
-	ch := s.broker.Subscribe(id)
-	defer s.broker.Unsubscribe(id, ch)
 	for {
 		select {
 		case <-r.Context().Done():

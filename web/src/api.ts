@@ -7,8 +7,7 @@ export interface SessionEvent {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'agent'
-  agent?: string
+  role: 'user'
   content: string
   at: string
 }

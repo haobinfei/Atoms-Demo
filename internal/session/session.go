@@ -34,7 +34,9 @@ type Session struct {
 	Messages  []Message `json:"messages"`
 }
 
-// Message is one user or agent utterance inside the session timeline.
+// Message is one user or agent utterance inside the session timeline. The
+// timeline itself renders the 事件流 (Event Stream); Messages are the
+// persisted conversation record a chat-style client would show.
 type Message struct {
 	Role    string    `json:"role"` // user | agent
 	Agent   string    `json:"agent,omitempty"`
@@ -136,7 +138,7 @@ func (s *Store) AppendEvent(id string, ev Event) (Event, error) {
 	return ev, nil
 }
 
-// AppendMessage persists one user/agent utterance to the session timeline.
+// AppendMessage persists one user utterance to the session timeline.
 func (s *Store) AppendMessage(id string, msg Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -148,6 +150,40 @@ func (s *Store) AppendMessage(id string, msg Message) error {
 		msg.At = time.Now()
 	}
 	sess.Messages = append(sess.Messages, msg)
+	return s.saveLocked(sess)
+}
+
+// BeginTurn atomically flips the session into "building" so concurrent chat
+// requests serialize instead of racing two pipelines: the first caller wins,
+// later ones see ok=false and must be rejected. prev is the status to
+// restore with SetStatus if the caller fails after winning.
+func (s *Store) BeginTurn(id string) (prev string, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(id)
+	if err != nil {
+		return "", false, err
+	}
+	if sess.Status == "building" {
+		return "building", false, nil
+	}
+	prev = sess.Status
+	sess.Status = "building"
+	if err := s.saveLocked(sess); err != nil {
+		return "", false, err
+	}
+	return prev, true, nil
+}
+
+// SetStatus overwrites the session status (turn rollback, future admin ops).
+func (s *Store) SetStatus(id, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(id)
+	if err != nil {
+		return err
+	}
+	sess.Status = status
 	return s.saveLocked(sess)
 }
 

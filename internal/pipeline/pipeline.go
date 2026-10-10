@@ -93,11 +93,15 @@ func (p *Pipeline) EmitUserMessage(id string, msg session.Message) {
 	}})
 }
 
-// effectivePrompt folds the full 消息历史 into the prompt the 生成引擎
-// sees. Turn 1 is the bare original idea; later turns re-state the original
-// requirement plus every follow-up, so a full regeneration still honors
-// both the initial intent and the newest iteration request.
-func effectivePrompt(sess *session.Session) string {
+// effectivePrompt folds the full 消息历史 and the current file set into the
+// prompt the 生成引擎 sees (ADR-0003). Turn 1 is the bare original idea;
+// later turns re-state the original requirement, the files of the current
+// version, and every follow-up, so a full regeneration still honors both
+// the initial intent and the newest iteration request.
+// sess.Prompt and Messages[0] are the same fact by construction (Create
+// writes both); later turns rebuild from Messages so the engine never sees
+// a bare follow-up out of context.
+func effectivePrompt(sess *session.Session, files map[string]string) string {
 	var user []string
 	for _, m := range sess.Messages {
 		if m.Role == "user" {
@@ -108,11 +112,51 @@ func effectivePrompt(sess *session.Session) string {
 		return sess.Prompt
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "原始需求：%s\n\n请在保持原始需求不变的前提下，按以下迭代要求重新生成完整应用：", user[0])
+	fmt.Fprintf(&b, "原始需求：%s\n", user[0])
+	if len(files) > 0 {
+		b.WriteString("\n当前版本文件内容（请在保持整体结构的前提下输出完整的新版本）：")
+		paths := make([]string, 0, len(files))
+		for path := range files {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			fmt.Fprintf(&b, "\n\n--- %s ---\n%s", path, files[path])
+		}
+	}
+	b.WriteString("\n\n请在保持原始需求不变的前提下，按以下迭代要求重新生成完整应用：")
 	for i, u := range user[1:] {
 		fmt.Fprintf(&b, "\n%d. %s", i+1, u)
 	}
 	return b.String()
+}
+
+// readAppFiles loads the session's current generated sources (empty on turn
+// 1, when the app directory does not exist yet).
+func readAppFiles(dir string) (map[string]string, error) {
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // Run executes the full agent sequence for the session's current prompt.
@@ -143,10 +187,30 @@ func (p *Pipeline) Run(ctx context.Context, id string) {
 		}
 	}
 	p.setStatus(id, status)
+	// The summary lands before "done" so that a client that has seen done
+	// can rely on all session writes being complete (tests clean up
+	// workspaces on done; a trailing write would race the cleanup).
+	p.appendTurnSummary(id, status, files, err)
 	p.emit(id, session.Event{Type: "done", Agent: "sarah", Payload: map[string]any{
 		"status": status,
 		"detail": "补充 SEO 元信息：title、description、og 标签",
 	}})
+}
+
+// appendTurnSummary records the agent's side of the conversation so the
+// persisted 消息历史 carries both user utterances and agent responses.
+func (p *Pipeline) appendTurnSummary(id, status string, files provider.FileSet, runErr error) {
+	content := fmt.Sprintf("应用已生成（生成引擎：%s，共 %d 个文件）", p.Prov.Name(), len(files))
+	if status == "failed" {
+		content = "本回合构建失败"
+		if runErr != nil {
+			content = fmt.Sprintf("%s：%v", content, runErr)
+		}
+	}
+	msg := session.Message{Role: "agent", Agent: "sarah", Content: content}
+	if err := p.Store.AppendMessage(id, msg); err != nil {
+		slog.Error("append turn summary", "session", id, "err", err)
+	}
 }
 
 func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error) {
@@ -170,15 +234,22 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 	if !step("mike", "plan", "拆解需求并制定执行计划") {
 		return nil, ctx.Err()
 	}
-	if !step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", effectivePrompt(sess))) {
+	if !step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", sess.Prompt)) {
 		return nil, ctx.Err()
 	}
 	if !step("bob", "architecture", "设计系统结构：React + TypeScript，组件化组织") {
 		return nil, ctx.Err()
 	}
 
+	// Current-version files feed the augmented prompt (ADR-0003); missing
+	// on turn 1, stale-read races are harmless because regeneration is
+	// prompt-driven and the write below lands atomically per file.
+	var current map[string]string
+	if files, err := readAppFiles(filepath.Join(p.Store.Workspace(id), "app")); err == nil {
+		current = files
+	}
 	var files provider.FileSet
-	files, err = p.Prov.Generate(ctx, effectivePrompt(sess), func(stage, detail string) {
+	files, err = p.Prov.Generate(ctx, effectivePrompt(sess, current), func(stage, detail string) {
 		if stage == "degrade" {
 			p.emit(id, session.Event{Type: "agent", Agent: "mike", Payload: map[string]any{"detail": detail}})
 		}
