@@ -1,0 +1,61 @@
+import { useState } from 'react'
+import { createSession } from './api'
+
+const EXAMPLES = [
+  '一家咖啡店的电商网站',
+  '一个记录每日待办的小工具',
+  '一个数据运营分析仪表盘',
+  '一个设计师的作品集网站',
+]
+
+export default function Home({ onCreated }: { onCreated: (id: string) => void }) {
+  const [prompt, setPrompt] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async (text: string) => {
+    if (!text.trim() || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      onCreated(await createSession(text.trim()))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="home">
+      <div className="home-brand">Atoms Demo</div>
+      <h1 className="home-title">把想法变成可运行的应用</h1>
+      <p className="home-subtitle">描述你想构建的应用，一支 AI 团队将为你生成、构建并展示它。</p>
+      <form
+        className="home-composer"
+        onSubmit={(e) => {
+          e.preventDefault()
+          void submit(prompt)
+        }}
+      >
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="例如：一家咖啡店的电商网站，能浏览商品、加入购物车…"
+          rows={3}
+          autoFocus
+        />
+        <button type="submit" disabled={busy}>
+          {busy ? '创建中…' : '开始构建'}
+        </button>
+      </form>
+      {error && <div className="home-error">{error}</div>}
+      <div className="home-examples">
+        {EXAMPLES.map((ex) => (
+          <button key={ex} type="button" className="chip" onClick={() => void submit(ex)}>
+            {ex}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
