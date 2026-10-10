@@ -145,6 +145,24 @@ body {
   min-width: 0;
 }
 
+.ws-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.ws-actions button,
+.ws-export {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
 .ws-prompt {
   font-size: 14px;
   white-space: nowrap;
@@ -182,23 +200,6 @@ body {
   border-right: 1px solid var(--border);
   overflow-y: auto;
   padding: 16px;
-}
-
-.ws-preview {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ws-preview-placeholder {
-  text-align: center;
-  color: var(--text-dim);
-}
-
-.ws-preview-title {
-  font-size: 18px;
-  color: var(--text);
-  margin-bottom: 8px;
 }
 
 /* ---------- Timeline ---------- */
@@ -283,4 +284,194 @@ body {
   50% {
     opacity: 0.4;
   }
+}
+
+/* ---------- Preview ---------- */
+.preview {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.device-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.device-toggle button,
+.preview-actions button,
+.preview-actions a {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.device-toggle button.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.preview-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.preview-stage {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  background: #0a0c10;
+  padding: 16px;
+}
+
+.frame {
+  width: 100%;
+  max-width: 1200px;
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  transition: width 0.2s ease;
+}
+
+.frame.mobile {
+  width: 390px;
+  max-width: 390px;
+  border-radius: 24px;
+}
+
+/* ---------- Files drawer ---------- */
+.drawer-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 20;
+}
+
+.files-drawer {
+  background: var(--panel);
+  width: 70vw;
+  max-width: 900px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+.fd-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fd-head button {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.fd-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  min-height: 0;
+}
+
+.fd-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.fd-list button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--dim);
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fd-list button.on,
+.fd-list button:hover {
+  background: #1f2430;
+  color: var(--text);
+}
+
+.fd-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fd-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fd-toolbar code {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.fd-toolbar button {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fd-view pre {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  color: var(--text);
+}
+
+.fd-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dim);
 }

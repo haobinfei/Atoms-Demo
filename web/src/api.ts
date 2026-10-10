@@ -36,3 +36,20 @@ export async function getSession(id: string): Promise<Session> {
 export function openEventStream(id: string, after: number): EventSource {
   return new EventSource(`/api/sessions/${id}/events?after=${after}`)
 }
+
+export interface FileEntry {
+  path: string
+  size: number
+}
+
+export async function listFiles(id: string): Promise<FileEntry[]> {
+  const resp = await fetch(`/api/sessions/${id}/files`)
+  if (!resp.ok) throw new Error(`list files: ${resp.status}`)
+  return (await resp.json()) as FileEntry[]
+}
+
+export async function getFile(id: string, path: string): Promise<{ path: string; content: string }> {
+  const resp = await fetch(`/api/sessions/${id}/file/${path}`)
+  if (!resp.ok) throw new Error(`get file: ${resp.status}`)
+  return (await resp.json()) as { path: string; content: string }
+}

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
@@ -66,6 +67,9 @@ type Pipeline struct {
 	Store  *session.Store
 	Broker *Broker
 	Prov   provider.Provider
+	// Builder compiles the written files into a previewable dist; nil skips
+	// building (kept optional so provider-only tests stay light).
+	Builder *builder.Builder
 	// StepDelay keeps the timeline human-readable in demos; tests may shrink it.
 	StepDelay time.Duration
 }
@@ -94,6 +98,13 @@ func (p *Pipeline) Run(ctx context.Context, id string) {
 		if err := p.writeFiles(id, files); err != nil {
 			status = "failed"
 			fail(err)
+		} else if p.Builder != nil {
+			appDir := filepath.Join(p.Store.Workspace(id), "app")
+			distDir := filepath.Join(p.Store.Workspace(id), "dist")
+			if err := p.Builder.Build(appDir, distDir); err != nil {
+				status = "failed"
+				fail(err)
+			}
 		}
 	}
 	p.setStatus(id, status)

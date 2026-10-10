@@ -3,14 +3,19 @@
 package server
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
@@ -32,6 +37,7 @@ type Server struct {
 	cfg      Config
 	broker   *pipeline.Broker
 	pipeline *pipeline.Pipeline
+	builder  *builder.Builder
 }
 
 func New(cfg Config) *Server {
@@ -44,6 +50,7 @@ func New(cfg Config) *Server {
 	if prov == nil {
 		prov = provider.ChainFromEnv(context.Background(), cfg.Env)
 	}
+	build := builder.New()
 	return &Server{
 		store:  store,
 		cfg:    cfg,
@@ -52,8 +59,10 @@ func New(cfg Config) *Server {
 			Store:     store,
 			Broker:    broker,
 			Prov:      prov,
+			Builder:   build,
 			StepDelay: 120 * time.Millisecond,
 		},
+		builder: build,
 	}
 }
 
@@ -63,7 +72,158 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
+	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
+	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
+	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
+	mux.HandleFunc("GET /app/{id}/{path...}", s.handleApp)
 	return mux
+}
+
+// appDir returns the session's generated-app directory after validating the
+// id is a plain workspace folder name (no traversal).
+func (s *Server) appDir(id string) (string, error) {
+	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return "", fmt.Errorf("invalid id")
+	}
+	return filepath.Join(s.store.Workspace(id), "app"), nil
+}
+
+// safeJoin resolves a user-supplied relative path inside root, refusing
+// anything that escapes it.
+func safeJoin(root, rel string) (string, error) {
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("path traversal refused")
+		}
+	}
+	clean := filepath.Clean("/" + filepath.FromSlash(rel))
+	full := filepath.Join(root, clean)
+	if !strings.HasPrefix(full, filepath.Clean(root)+string(os.PathSeparator)) && full != filepath.Clean(root) {
+		return "", fmt.Errorf("path escapes root")
+	}
+	return full, nil
+}
+
+// handleApp serves the built dist of a session: the live preview URL and
+// (later) the published URL. Publicly accessible, no auth.
+func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	dist := filepath.Join(s.store.Workspace(id), "dist")
+	rel := r.PathValue("path")
+	full := filepath.Join(dist, rel)
+	if rel == "" {
+		full = filepath.Join(dist, "index.html")
+	}
+	if !strings.HasPrefix(full, filepath.Clean(dist)+string(os.PathSeparator)) {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	if _, err := os.Stat(full); err != nil {
+		writeError(w, http.StatusNotFound, "not built yet")
+		return
+	}
+	http.ServeFile(w, r, full)
+}
+
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
+	appDir, err := s.appDir(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	type entry struct {
+		Path string `json:"path"`
+		Size int    `json:"size"`
+	}
+	var out []entry
+	err = filepath.WalkDir(appDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(appDir, path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		out = append(out, entry{Path: filepath.ToSlash(rel), Size: int(info.Size())})
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no files")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
+	appDir, err := s.appDir(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	full, err := safeJoin(appDir, r.PathValue("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"path":    filepath.ToSlash(r.PathValue("path")),
+		"content": string(data),
+	})
+}
+
+func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
+	appDir, err := s.appDir(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := os.Stat(appDir); err != nil {
+		writeError(w, http.StatusNotFound, "no files yet")
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"app.zip\"")
+	zw := zip.NewWriter(w)
+	err = filepath.WalkDir(appDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(appDir, path)
+		if err != nil {
+			return err
+		}
+		f, err := zw.Create(filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		_, err = io.Copy(f, src)
+		return err
+	})
+	if err != nil {
+		return // headers already written; nothing graceful left
+	}
+	_ = zw.Close()
 }
 
 // handleProviders exposes the 兜底链 members so the UI (and operators) can

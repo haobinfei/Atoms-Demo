@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { getSession, openEventStream, type Session, type SessionEvent } from './api'
+import FilesDrawer from './FilesDrawer'
+import Preview from './Preview'
 import Timeline from './Timeline'
 
 export default function Workspace({
@@ -11,6 +13,8 @@ export default function Workspace({
 }) {
   const [session, setSession] = useState<Session | null>(null)
   const [events, setEvents] = useState<SessionEvent[]>([])
+  const [builtAt, setBuiltAt] = useState('')
+  const [filesOpen, setFilesOpen] = useState(false)
   const seenRef = useRef(0)
 
   // Load persisted history, then follow the live event stream.
@@ -29,7 +33,9 @@ export default function Workspace({
         seenRef.current = Math.max(seenRef.current, ev.seq)
         setEvents((prev) => (prev.some((e) => e.seq === ev.seq) ? prev : [...prev, ev]))
         if (ev.type === 'done') {
-          setSession((prev) => (prev ? { ...prev, status: 'ready' } : prev))
+          const status = ((ev.payload?.status as string) ?? 'ready') as Session['status']
+          setSession((prev) => (prev ? { ...prev, status } : prev))
+          if (status === 'ready') setBuiltAt(new Date().toISOString())
         }
       }
       source.onerror = () => {
@@ -56,18 +62,22 @@ export default function Workspace({
           <div className="ws-prompt">{session?.prompt ?? sessionId}</div>
           <div className={`ws-status ws-status-${session?.status ?? 'building'}`}>{statusLabel}</div>
         </div>
+        <div className="ws-actions">
+          <button onClick={() => setFilesOpen(true)}>代码</button>
+          <a className="ws-export" href={`/api/sessions/${sessionId}/export`} download>
+            导出
+          </a>
+        </div>
       </header>
       <div className="ws-body">
         <aside className="ws-timeline">
           <Timeline events={events} prompt={session?.prompt ?? ''} />
         </aside>
         <main className="ws-preview">
-          <div className="ws-preview-placeholder">
-            <div className="ws-preview-title">实时预览</div>
-            <div className="ws-preview-hint">构建器与实时预览在下一切片接入（票 #4）</div>
-          </div>
+          <Preview sessionId={sessionId} builtAt={builtAt} />
         </main>
       </div>
+      <FilesDrawer sessionId={sessionId} open={filesOpen} onClose={() => setFilesOpen(false)} />
     </div>
   )
 }
