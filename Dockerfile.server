@@ -22,7 +22,8 @@ COPY --from=build /out/server /server
 # The volume mountpoint must already belong to the non-root user, or the
 # server cannot create session workspaces under /workspace.
 COPY --from=build --chown=65532:65532 /workspace /workspace
-USER appuser
+# 数值 UID：K8s runAsNonRoot 无法校验命名用户（appuser）非 root
+USER 65532:65532
 EXPOSE 4173
 VOLUME ["/workspace"]
 ENV PORT=4173 \
