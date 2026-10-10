@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -336,42 +337,89 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // public, credential-free URL /app/{id}/ now serves this version.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	sess, err := s.store.Load(id)
-	if err != nil {
+	if _, err := s.store.Load(id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if sess.Status == "building" {
+	// Claim the session atomically: a chat turn starting mid-publish would
+	// otherwise race this rebuild for the same distDir. The session shows
+	// "building" for the duration, which also 409s chat requests.
+	prev, ok, err := s.store.BeginTurn(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
 		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
 		return
 	}
+	restore := func() { _ = s.store.SetStatus(id, prev) }
 	appDir, err := s.appDir(id)
 	if err != nil {
+		restore()
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := os.Stat(appDir); err != nil {
+		restore()
 		writeError(w, http.StatusBadRequest, "no app to publish yet")
 		return
 	}
 	ws, err := s.workspaceDir(id)
 	if err != nil {
+		restore()
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	distDir := filepath.Join(ws, "dist")
-	if err := s.builder.Build(appDir, distDir); err != nil {
-		// Never leave a stale dist under the public URL after a failed
-		// publish; /app 404s until the next successful build/publish.
-		_ = os.RemoveAll(distDir)
+	// Build into a side directory and swap, so a failed rebuild never
+	// takes down the version /app is currently serving. The live-dist
+	// gap is two renames, not a full bundle write.
+	tmpDir := distDir + ".new"
+	bakDir := distDir + ".bak"
+	_ = os.RemoveAll(tmpDir)
+	_ = os.RemoveAll(bakDir)
+	if err := s.builder.Build(appDir, tmpDir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		restore()
 		writeError(w, http.StatusInternalServerError, "rebuild failed: "+err.Error())
+		return
+	}
+	swapped := false
+	if _, err := os.Stat(distDir); err == nil {
+		if err := os.Rename(distDir, bakDir); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			restore()
+			writeError(w, http.StatusInternalServerError, "stash previous dist: "+err.Error())
+			return
+		}
+		swapped = true
+	}
+	if err := os.Rename(tmpDir, distDir); err != nil {
+		if swapped {
+			_ = os.Rename(bakDir, distDir)
+		}
+		_ = os.RemoveAll(tmpDir)
+		restore()
+		writeError(w, http.StatusInternalServerError, "activate new dist: "+err.Error())
 		return
 	}
 	pub, err := s.store.RecordPublish(id, "/app/"+id+"/")
 	if err != nil {
+		// The new dist has no matching record; never let /app serve an
+		// unrecorded version — put the last recorded one back.
+		_ = os.RemoveAll(distDir)
+		if swapped {
+			if err := os.Rename(bakDir, distDir); err != nil {
+				slog.Error("restore previous dist after record failure", "session", id, "err", err)
+			}
+		}
+		restore()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_ = os.RemoveAll(bakDir)
+	_ = s.store.SetStatus(id, "ready")
 	writeJSON(w, http.StatusOK, pub)
 }
 

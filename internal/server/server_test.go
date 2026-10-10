@@ -19,12 +19,19 @@ func newTestServer(t *testing.T) *httptest.Server {
 // the deterministic choice when the test asserts on prompt-dependent output
 // (e.g. accent color after a chat turn).
 func newTestServerWith(t *testing.T, prov provider.Provider) *httptest.Server {
+	ts, _ := newTestServerDir(t, prov)
+	return ts
+}
+
+// newTestServerDir additionally exposes the workspace directory so tests
+// can inspect or corrupt on-disk state.
+func newTestServerDir(t *testing.T, prov provider.Provider) (*httptest.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
 	srv := server.New(server.Config{WorkspaceDir: dir, DevAuth: true, Prov: prov})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, dir
 }
 
 func TestCreateSessionPersistsWorkspace(t *testing.T) {

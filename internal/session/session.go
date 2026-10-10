@@ -85,6 +85,7 @@ func (s *Store) Create(prompt string) (*Session, error) {
 		CreatedAt: now,
 		UpdatedAt: now,
 		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
+		Publishes: []Publish{},
 	}
 	if err := os.MkdirAll(s.Workspace(id), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir workspace: %w", err)

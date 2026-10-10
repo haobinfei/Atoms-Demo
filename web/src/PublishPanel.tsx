@@ -21,8 +21,9 @@ export default function PublishPanel({
   useEffect(() => {
     void getPublishes(sessionId)
       .then((list) => {
-        setPublishes(list)
-        if (list.length > 0) setLatest(list[list.length - 1])
+        const safe = list ?? []
+        setPublishes(safe)
+        if (safe.length > 0) setLatest(safe[safe.length - 1])
       })
       .catch(() => setError(true))
   }, [sessionId])
@@ -31,7 +32,9 @@ export default function PublishPanel({
 
   useEffect(() => {
     if (!publicURL) return
-    void QRCode.toDataURL(publicURL, { width: 220, margin: 1 }).then(setQrDataUrl)
+    void QRCode.toDataURL(publicURL, { width: 220, margin: 1 })
+      .then(setQrDataUrl)
+      .catch(() => setError(true))
   }, [publicURL])
 
   async function doPublish() {
@@ -50,7 +53,18 @@ export default function PublishPanel({
 
   async function copyLink() {
     try {
-      await navigator.clipboard.writeText(publicURL)
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(publicURL)
+      } else {
+        // Non-secure contexts (e.g. plain http on a LAN IP) have no
+        // navigator.clipboard; fall back to the legacy copy path.
+        const ta = document.createElement('textarea')
+        ta.value = publicURL
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
