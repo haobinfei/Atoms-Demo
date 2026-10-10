@@ -41,6 +41,7 @@ export default function Workspace({
   useEffect(() => {
     let source: EventSource | null = null
     let cancelled = false
+    let watchdog: ReturnType<typeof setInterval> | null = null
 
     void getSession(sessionId)
       .then((sess) => {
@@ -70,6 +71,29 @@ export default function Workspace({
         source.onerror = () => {
           // EventSource auto-reconnects; nothing to do.
         }
+
+        // Watchdog: SSE can silently wedge behind proxies — a deploy
+        // rollout swapping the server pod mid-build leaves the stream
+        // half-alive (no data, no error), and EventSource never retries.
+        // While the session is building, poll for reconciliation so a
+        // stuck 生成中 recovers on its own within ~15s.
+        const reconcile = () => {
+          void getSession(sessionId)
+            .then((sess) => {
+              if (cancelled) return
+              setSession(sess)
+              const persisted = sess.events ?? []
+              seenRef.current = Math.max(seenRef.current, ...persisted.map((e) => e.seq), 0)
+              setEvents((prev) => {
+                const have = new Set(prev.map((e) => e.seq))
+                const missing = persisted.filter((e) => !have.has(e.seq))
+                return missing.length ? [...prev, ...missing] : prev
+              })
+              if (sess.status === 'ready') setBuiltAt(new Date().toISOString())
+            })
+            .catch(() => {})
+        }
+        watchdog = setInterval(reconcile, 15000)
       })
       .catch((err) => {
         // A 401 here means the AuthSphere session expired mid-use; the
@@ -81,6 +105,7 @@ export default function Workspace({
     return () => {
       cancelled = true
       source?.close()
+      if (watchdog) clearInterval(watchdog)
     }
   }, [sessionId])
 
