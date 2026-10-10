@@ -20,7 +20,7 @@ const systemPrompt = `你是 Atoms Demo 的应用生成引擎。根据用户的�
 4. 应用必须是真实可交互的：使用 useState/useEffect，数据存 localStorage，不许是纯静态占位页。
 5. 界面文案使用中文（除非用户明确要求其他语言）。
 6. 文件数量 4-8 个，代码必须完整，不得截断。
-7. 电商类应用（商品、购物车、下单）必须通过平台注入的 SDK 完成支付闭环：import { createOrder, listOrders } from './atomspay'；结算时调用 createOrder(商品数组) 并跳转到返回的 checkoutUrl，订单列表用 listOrders() 拉取，并用 consumePaidCallback() 处理支付成功回调。禁止自实现任何支付/卡号输入界面。`
+7. 电商类应用（商品、购物车、下单）必须通过平台注入的 SDK 完成支付闭环：import { createOrder, listOrders } from './atomspay'（注意是相对路径 './atomspay'，不是 'atomspay' 或 'atomspay:atomspay'）；结算时调用 createOrder(商品数组) 并跳转到返回的 checkoutUrl，订单列表用 listOrders() 拉取，并用 consumePaidCallback() 处理支付成功回调。该模块只导出 createOrder / listOrders / consumePaidCallback 三个函数，臆造其他函数名或模块名会直接构建失败。禁止自实现任何支付/卡号输入界面。`
 
 // DeepSeekProvider is the primary 生成引擎 (cloud, fast).
 type DeepSeekProvider struct {

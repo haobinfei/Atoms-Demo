@@ -96,6 +96,21 @@ func TestBuildFailsOnSyntaxErrorAndUnknownImport(t *testing.T) {
 	}
 }
 
+// Regression: LLMs sometimes invent a bare "atomspay:atomspay" specifier and
+// hallucinated export names like simulatePayment. The platform plugin must
+// resolve every such spelling to the injected SDK so the build still passes.
+func TestBuildToleratesHallucinatedAtomsPayImports(t *testing.T) {
+	files := provider.FileSet{
+		"index.html": "<html><body><div id=\"root\"></div></body></html>",
+		"src/main.tsx": "import { simulatePayment } from 'atomspay:atomspay'\n" +
+			"export default function A(){ console.log(simulatePayment); return <div/>}",
+	}
+	dir := t.TempDir()
+	if err := builder.New().Build(writeApp(t, dir, files), filepath.Join(dir, "dist")); err != nil {
+		t.Fatalf("hallucinated atomspay import should still build: %v", err)
+	}
+}
+
 // Regression: the server's default workspace dir is relative ("workspace"),
 // and esbuild rejects a non-absolute AbsWorkingDir.
 func TestBuildWithRelativePaths(t *testing.T) {

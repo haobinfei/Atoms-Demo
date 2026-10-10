@@ -61,4 +61,19 @@ export function consumePaidCallback(): string | null {
   window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash)
   return paid
 }
+
+// simulatePayment 兼容别名：生成引擎常臆造这个函数名导致构建失败。
+// 语义为「跳过收银台页面直接完成一笔模拟支付」——createOrder 后立即
+// 用测试卡支付并返回已支付订单。新代码请优先使用 createOrder 并跳转
+// 收银台（让用户看到收银台页面），本函数仅保证臆造代码可编译可运行。
+export async function simulatePayment(items: PayItem[]): Promise<PayOrder> {
+  const { id } = await createOrder(items)
+  const resp = await fetch('/api/pay/orders/' + id + '/pay?app=' + appId(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ card: '4242 4242 4242 4242' }),
+  })
+  if (!resp.ok) throw new Error('模拟支付失败')
+  return resp.json()
+}
 `

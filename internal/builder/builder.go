@@ -108,7 +108,9 @@ func platformPlugin() api.Plugin {
 	return api.Plugin{
 		Name: "atoms-vendor",
 		Setup: func(build api.PluginBuild) {
-			build.OnResolve(api.OnResolveOptions{Filter: `^\./atomspay(\.ts)?$`},
+			// 兼容 LLM 臆造的各种写法：'./atomspay'、'atomspay'、
+			// 'atomspay:atomspay'、'/atomspay.ts' 一律解析到平台注入的 SDK。
+			build.OnResolve(api.OnResolveOptions{Filter: `^\.?/?atomspay(:atomspay)?(\.ts)?$`},
 				func(args api.OnResolveArgs) (api.OnResolveResult, error) {
 					return api.OnResolveResult{Path: "atomspay", Namespace: "atomspay"}, nil
 				})
