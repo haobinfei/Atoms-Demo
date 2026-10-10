@@ -21,6 +21,10 @@ type Config struct {
 	// DevAuth bypasses the AuthSphere gate for local development
 	// (replaced by the real middleware in the auth slice).
 	DevAuth bool
+	// Prov overrides the 生成引擎; defaults to the ADR-0002 env chain.
+	Prov provider.Provider
+	// Env configures the fallback chain when Prov is nil.
+	Env provider.EnvConfig
 }
 
 type Server struct {
@@ -36,6 +40,10 @@ func New(cfg Config) *Server {
 	}
 	store := session.NewStore(cfg.WorkspaceDir)
 	broker := pipeline.NewBroker()
+	prov := cfg.Prov
+	if prov == nil {
+		prov = provider.ChainFromEnv(context.Background(), cfg.Env)
+	}
 	return &Server{
 		store:  store,
 		cfg:    cfg,
@@ -43,7 +51,7 @@ func New(cfg Config) *Server {
 		pipeline: &pipeline.Pipeline{
 			Store:     store,
 			Broker:    broker,
-			Prov:      provider.FakeProvider{},
+			Prov:      prov,
 			StepDelay: 120 * time.Millisecond,
 		},
 	}

@@ -131,9 +131,11 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 	}
 
 	var files provider.FileSet
-	files, err = p.Prov.Generate(sess.Prompt, func(stage, detail string) {
+	files, err = p.Prov.Generate(ctx, sess.Prompt, func(stage, detail string) {
 		if stage == "file" {
 			p.emit(id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": detail}})
+		} else if stage == "degrade" {
+			p.emit(id, session.Event{Type: "agent", Agent: "mike", Payload: map[string]any{"detail": detail}})
 		}
 	})
 	if err != nil {

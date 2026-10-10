@@ -63,6 +63,36 @@ func createSession(t *testing.T, tsURL, prompt string) string {
 	return out.SessionID
 }
 
+// readSSEUntilDone collects events until one has type "done" (or the cap
+// is hit), so the pipeline goroutine has finished before the test asserts
+// on files and before t.TempDir cleanup runs.
+func readSSEUntilDone(t *testing.T, url string, cap int) []session.Event {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("open event stream: %v", err)
+	}
+	defer resp.Body.Close()
+	var events []session.Event
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() && len(events) < cap {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev session.Event
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		events = append(events, ev)
+		if ev.Type == "done" {
+			return events
+		}
+	}
+	t.Fatalf("no done event within %d events", cap)
+	return nil
+}
+
 func TestEventStreamEmitsPipelineInOrder(t *testing.T) {
 	ts := newTestServer(t)
 	id := createSession(t, ts.URL, "一家咖啡店的电商网站")

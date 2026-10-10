@@ -7,13 +7,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/server"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
-	srv := server.New(server.Config{WorkspaceDir: dir, DevAuth: true})
+	srv := server.New(server.Config{WorkspaceDir: dir, DevAuth: true, Prov: provider.FakeProvider{}})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
