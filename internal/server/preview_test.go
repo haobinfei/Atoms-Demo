@@ -34,6 +34,7 @@ func TestPreviewServesBuiltApp(t *testing.T) {
 	if err != nil || js.StatusCode != http.StatusOK {
 		t.Fatalf("bundle not served: %v status=%v", err, js.StatusCode)
 	}
+	jsBody, _ := io.ReadAll(js.Body)
 	js.Body.Close()
 
 	// The preview iframe reloads these URLs after every build; stale cached
@@ -43,6 +44,16 @@ func TestPreviewServesBuiltApp(t *testing.T) {
 	}
 	if cc := js.Header.Get("Cache-Control"); cc != "no-cache" {
 		t.Fatalf("bundle Cache-Control = %q, want no-cache", cc)
+	}
+
+	// index.html carries the per-build storage namespace so an early
+	// localStorage write cannot shadow later builds' default data; the
+	// bundle itself must be served untouched.
+	if !strings.Contains(string(body), "data-atoms-storage-ns") {
+		t.Fatal("index.html missing storage-namespace injection")
+	}
+	if strings.Contains(string(jsBody), "data-atoms-storage-ns") {
+		t.Fatal("storage-namespace injection leaked into the bundle")
 	}
 }
 

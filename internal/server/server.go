@@ -290,7 +290,61 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	// bundle, so the preview shows a stale app. no-cache forces a
 	// revalidation round-trip: unchanged files still get a cheap 304.
 	w.Header().Set("Cache-Control", "no-cache")
+	if rel == "" {
+		s.servePreviewIndex(w, r, full)
+		return
+	}
 	http.ServeFile(w, r, full)
+}
+
+// servePreviewIndex serves a built app's index.html with a per-build
+// storage namespace injected. Generated apps routinely persist state in
+// localStorage with "stored value wins over defaults" logic; without
+// isolation an early (empty or outdated) write shadows the richer
+// defaults of every later build, and the preview looks "stale" no matter
+// how often it rebuilds. Keying the namespace to the build's mtime gives
+// each rebuild a fresh storage view (new defaults show) while edits made
+// inside one build still survive preview reloads.
+func (s *Server) servePreviewIndex(w http.ResponseWriter, r *http.Request, indexPath string) {
+	body, err := os.ReadFile(indexPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not built yet")
+		return
+	}
+	info, err := os.Stat(indexPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not built yet")
+		return
+	}
+	// Digits only — this string lands verbatim in the injected script.
+	ns := fmt.Sprintf("b%d:", info.ModTime().Unix())
+	injection := []byte(`<script data-atoms-storage-ns>
+(() => {
+  const NS = "` + ns + `";
+  const wrap = (store) => {
+    if (!store || store.__atomsNS) return;
+    const get = store.getItem.bind(store);
+    const set = store.setItem.bind(store);
+    const del = store.removeItem.bind(store);
+    store.getItem = (k) => get(NS + k);
+    store.setItem = (k, v) => set(NS + k, String(v));
+    store.removeItem = (k) => del(NS + k);
+    Object.defineProperty(store, "__atomsNS", { value: NS });
+  };
+  try { wrap(window.localStorage); wrap(window.sessionStorage); } catch (e) { /* un-isolated fallback */ }
+})();
+</script>`)
+	// Builder-generated HTML always carries <head>; fall back to prepending
+	// so a hand-written oddity still gets the isolation.
+	out := body
+	if i := strings.Index(strings.ToLower(string(body)), "<head>"); i >= 0 {
+		j := i + len("<head>")
+		out = append(append(append([]byte{}, body[:j]...), injection...), body[j:]...)
+	} else {
+		out = append(append([]byte{}, injection...), body...)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(out)
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
