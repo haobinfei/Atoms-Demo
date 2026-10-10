@@ -75,8 +75,8 @@ type Pipeline struct {
 	StepDelay time.Duration
 }
 
-func (p *Pipeline) emit(id string, ev session.Event) {
-	appended, err := p.Store.AppendEvent(id, ev)
+func (p *Pipeline) emit(owner, id string, ev session.Event) {
+	appended, err := p.Store.AppendEvent(owner, id, ev)
 	if err != nil {
 		slog.Error("append event", "session", id, "type", ev.Type, "err", err)
 		return
@@ -86,8 +86,8 @@ func (p *Pipeline) emit(id string, ev session.Event) {
 
 // EmitUserMessage puts the user's utterance onto the 事件流 so the
 // timeline shows it as a bubble before the 智能体 team starts the turn.
-func (p *Pipeline) EmitUserMessage(id string, msg session.Message) {
-	p.emit(id, session.Event{Type: "message", Payload: map[string]any{
+func (p *Pipeline) EmitUserMessage(owner, id string, msg session.Message) {
+	p.emit(owner, id, session.Event{Type: "message", Payload: map[string]any{
 		"role":    msg.Role,
 		"content": msg.Content,
 	}})
@@ -160,23 +160,23 @@ func readAppFiles(dir string) (map[string]string, error) {
 }
 
 // Run executes the full agent sequence for the session's current prompt.
-func (p *Pipeline) Run(ctx context.Context, id string) {
+func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 	fail := func(err error) {
-		p.emit(id, session.Event{Type: "error", Payload: map[string]any{"message": err.Error()}})
+		p.emit(owner, id, session.Event{Type: "error", Payload: map[string]any{"message": err.Error()}})
 	}
-	files, err := p.run(ctx, id)
+	files, err := p.run(ctx, owner, id)
 	status := "ready"
 	if err != nil {
 		status = "failed"
 		fail(err)
 	}
 	if files != nil {
-		if err := p.writeFiles(id, files); err != nil {
+		if err := p.writeFiles(owner, id, files); err != nil {
 			status = "failed"
 			fail(err)
 		} else if p.Builder != nil {
-			appDir := filepath.Join(p.Store.Workspace(id), "app")
-			distDir := filepath.Join(p.Store.Workspace(id), "dist")
+			appDir := filepath.Join(p.Store.Workspace(owner, id), "app")
+			distDir := filepath.Join(p.Store.Workspace(owner, id), "dist")
 			if err := p.Builder.Build(appDir, distDir); err != nil {
 				// Drop any stale dist so /app never serves an outdated build
 				// while the session is failed.
@@ -186,12 +186,12 @@ func (p *Pipeline) Run(ctx context.Context, id string) {
 			}
 		}
 	}
-	p.setStatus(id, status)
+	p.setStatus(owner, id, status)
 	// The summary lands before "done" so that a client that has seen done
 	// can rely on all session writes being complete (tests clean up
 	// workspaces on done; a trailing write would race the cleanup).
-	p.appendTurnSummary(id, status, files, err)
-	p.emit(id, session.Event{Type: "done", Agent: "sarah", Payload: map[string]any{
+	p.appendTurnSummary(owner, id, status, files, err)
+	p.emit(owner, id, session.Event{Type: "done", Agent: "sarah", Payload: map[string]any{
 		"status": status,
 		"detail": "补充 SEO 元信息：title、description、og 标签",
 	}})
@@ -199,7 +199,7 @@ func (p *Pipeline) Run(ctx context.Context, id string) {
 
 // appendTurnSummary records the agent's side of the conversation so the
 // persisted 消息历史 carries both user utterances and agent responses.
-func (p *Pipeline) appendTurnSummary(id, status string, files provider.FileSet, runErr error) {
+func (p *Pipeline) appendTurnSummary(owner, id, status string, files provider.FileSet, runErr error) {
 	content := fmt.Sprintf("应用已生成（生成引擎：%s，共 %d 个文件）", p.Prov.Name(), len(files))
 	if status == "failed" {
 		content = "本回合构建失败"
@@ -208,13 +208,13 @@ func (p *Pipeline) appendTurnSummary(id, status string, files provider.FileSet, 
 		}
 	}
 	msg := session.Message{Role: "agent", Agent: "sarah", Content: content}
-	if err := p.Store.AppendMessage(id, msg); err != nil {
+	if err := p.Store.AppendMessage(owner, id, msg); err != nil {
 		slog.Error("append turn summary", "session", id, "err", err)
 	}
 }
 
-func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error) {
-	sess, err := p.Store.Load(id)
+func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet, error) {
+	sess, err := p.Store.Load(owner, id)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +227,7 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 			}
 		}
 		payload := map[string]any{"detail": detail}
-		p.emit(id, session.Event{Type: typ, Agent: agent, Payload: payload})
+		p.emit(owner, id, session.Event{Type: typ, Agent: agent, Payload: payload})
 		return true
 	}
 
@@ -245,13 +245,13 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 	// on turn 1, stale-read races are harmless because regeneration is
 	// prompt-driven and the write below lands atomically per file.
 	var current map[string]string
-	if files, err := readAppFiles(filepath.Join(p.Store.Workspace(id), "app")); err == nil {
+	if files, err := readAppFiles(filepath.Join(p.Store.Workspace(owner, id), "app")); err == nil {
 		current = files
 	}
 	var files provider.FileSet
 	files, err = p.Prov.Generate(ctx, effectivePrompt(sess, current), func(stage, detail string) {
 		if stage == "degrade" {
-			p.emit(id, session.Event{Type: "agent", Agent: "mike", Payload: map[string]any{"detail": detail}})
+			p.emit(owner, id, session.Event{Type: "agent", Agent: "mike", Payload: map[string]any{"detail": detail}})
 		}
 	})
 	if err != nil {
@@ -265,19 +265,19 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
-		p.emit(id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": path}})
+		p.emit(owner, id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": path}})
 	}
 	return files, nil
 }
 
-func (p *Pipeline) writeFiles(id string, files provider.FileSet) error {
+func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet) error {
 	// Defense in depth: files from a directly-injected Prov (tests, future
 	// bare providers) bypass the chain's validation — enforce it at the
 	// write boundary too.
 	if err := provider.Validate(files); err != nil {
 		return fmt.Errorf("invalid file set: %w", err)
 	}
-	appDir := filepath.Join(p.Store.Workspace(id), "app")
+	appDir := filepath.Join(p.Store.Workspace(owner, id), "app")
 	for path, content := range files {
 		full := filepath.Join(appDir, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -290,14 +290,14 @@ func (p *Pipeline) writeFiles(id string, files provider.FileSet) error {
 	return nil
 }
 
-func (p *Pipeline) setStatus(id, status string) {
-	sess, err := p.Store.Load(id)
+func (p *Pipeline) setStatus(owner, id, status string) {
+	sess, err := p.Store.Load(owner, id)
 	if err != nil {
 		slog.Error("load session for status update", "session", id, "err", err)
 		return
 	}
 	sess.Status = status
-	if err := p.Store.Save(sess); err != nil {
+	if err := p.Store.Save(owner, sess); err != nil {
 		slog.Error("save session status", "session", id, "status", status, "err", err)
 	}
 }

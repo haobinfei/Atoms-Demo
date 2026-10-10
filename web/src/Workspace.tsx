@@ -9,9 +9,11 @@ const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主�
 
 export default function Workspace({
   sessionId,
+  user,
   onExit,
 }: {
   sessionId: string
+  user: string
   onExit: () => void
 }) {
   const [session, setSession] = useState<Session | null>(null)
@@ -90,6 +92,7 @@ export default function Workspace({
           <div className={`ws-status ws-status-${session?.status ?? 'building'}`}>{statusLabel}</div>
         </div>
         <div className="ws-actions">
+          <span className="ws-user">{user}</span>
           <button disabled={session?.status === 'building'} onClick={() => setPublishOpen(true)}>
             发布
           </button>

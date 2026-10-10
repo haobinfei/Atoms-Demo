@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -24,9 +25,14 @@ import (
 
 type Config struct {
 	WorkspaceDir string
-	// DevAuth bypasses the AuthSphere gate for local development
-	// (replaced by the real middleware in the auth slice).
+	// Auth is the AuthSphere OIDC middleware. When set, every /api/* route
+	// (except /api/auth/*) requires a valid JWT and sessions are isolated
+	// per user; /app/{id}/ stays public via the session store's id index.
+	Auth *auth.Middleware
+	// DevAuth bypasses the AuthSphere gate for local development: requests
+	// run as DevUser without any token check.
 	DevAuth bool
+	DevUser string
 	// Prov overrides the 生成引擎; defaults to the ADR-0002 env chain.
 	Prov provider.Provider
 	// Env configures the fallback chain when Prov is nil.
@@ -44,6 +50,9 @@ type Server struct {
 func New(cfg Config) *Server {
 	if cfg.WorkspaceDir == "" {
 		cfg.WorkspaceDir = "workspace"
+	}
+	if cfg.DevUser == "" {
+		cfg.DevUser = "dev-user"
 	}
 	store := session.NewStore(cfg.WorkspaceDir)
 	broker := pipeline.NewBroker()
@@ -69,6 +78,11 @@ func New(cfg Config) *Server {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if s.cfg.Auth != nil {
+		mux.HandleFunc("GET /api/auth/login", s.cfg.Auth.Login)
+		mux.HandleFunc("GET /api/auth/callback", s.cfg.Auth.Callback)
+	}
+	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
@@ -80,21 +94,63 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
 	mux.HandleFunc("GET /app/{id}/{path...}", s.handleApp)
-	return mux
+	var handler http.Handler = mux
+	if s.cfg.Auth != nil {
+		handler = s.cfg.Auth.Wrap(handler)
+	} else if s.cfg.DevAuth {
+		handler = devUserMiddleware(handler, s.cfg.DevUser)
+	}
+	return handler
+}
+
+// devUserMiddleware injects the development user into every request
+// context, so the handlers treat it exactly like an authenticated user.
+func devUserMiddleware(next http.Handler, user string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), devUserKey{}, user)))
+	})
+}
+
+// devUserKey carries the dev-bypass user; the auth package owns the
+// production key, so this one is server-local.
+type devUserKey struct{}
+
+// requestUser returns the authenticated (or dev-bypass) user for the
+// request; "" only for routes that never pass through the middleware.
+func (s *Server) requestUser(r *http.Request) string {
+	if u := auth.UserFrom(r.Context()); u != "" {
+		return u
+	}
+	v, _ := r.Context().Value(devUserKey{}).(string)
+	return v
+}
+
+// handleMe reports who the current request runs as; the web login gate
+// uses it to decide whether to redirect to AuthSphere.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	user := s.requestUser(r)
+	if user == "" {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"user": user})
 }
 
 // workspaceDir validates the id is a plain workspace folder name (no
 // traversal) and returns the session's workspace directory.
-func (s *Server) workspaceDir(id string) (string, error) {
+func (s *Server) workspaceDir(user, id string) (string, error) {
 	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
 		return "", fmt.Errorf("invalid id")
 	}
-	return s.store.Workspace(id), nil
+	if !session.ValidOwner(user) {
+		return "", fmt.Errorf("invalid user")
+	}
+	return s.store.Workspace(user, id), nil
 }
 
 // appDir returns the session's generated-app directory.
-func (s *Server) appDir(id string) (string, error) {
-	ws, err := s.workspaceDir(id)
+func (s *Server) appDir(user, id string) (string, error) {
+	ws, err := s.workspaceDir(user, id)
 	if err != nil {
 		return "", err
 	}
@@ -121,9 +177,16 @@ func safeJoin(root, rel string) (string, error) {
 // (later) the published URL. Publicly accessible, no auth.
 func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	ws, err := s.workspaceDir(id)
+	// /app is shared publicly: no user on the context, so the owner is
+	// resolved through the store's id index (the random id is the capability).
+	owner, err := s.store.IndexOwner(id)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	ws, err := s.workspaceDir(owner, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	dist := filepath.Join(ws, "dist")
@@ -144,7 +207,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
-	appDir, err := s.appDir(r.PathValue("id"))
+	appDir, err := s.appDir(s.requestUser(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -180,7 +243,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
-	appDir, err := s.appDir(r.PathValue("id"))
+	appDir, err := s.appDir(s.requestUser(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -202,7 +265,7 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	appDir, err := s.appDir(r.PathValue("id"))
+	appDir, err := s.appDir(s.requestUser(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -266,19 +329,20 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
-	sess, err := s.store.Create(strings.TrimSpace(req.Prompt))
+	user := s.requestUser(r)
+	sess, err := s.store.Create(user, strings.TrimSpace(req.Prompt))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// The pipeline (FakeProvider for this slice) runs asynchronously and
-	// streams events into the session's event log; see handleEvents.
-	s.runPipeline(sess.ID)
+	// The pipeline runs asynchronously and streams events into the
+	// session's event log; see handleEvents.
+	s.runPipeline(user, sess.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.store.Load(r.PathValue("id"))
+	sess, err := s.store.Load(s.requestUser(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -288,8 +352,8 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 
 // runPipeline executes the agent pipeline for the session asynchronously;
 // events land in the session's event log and are fanned out to SSE clients.
-func (s *Server) runPipeline(id string) {
-	go s.pipeline.Run(context.Background(), id)
+func (s *Server) runPipeline(user, id string) {
+	go s.pipeline.Run(context.Background(), user, id)
 }
 
 // handleChat starts a new 回合 (Turn): the follow-up message lands on the
@@ -304,14 +368,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "message is required")
 		return
 	}
-	if _, err := s.store.Load(id); err != nil {
+	user := s.requestUser(r)
+	if _, err := s.store.Load(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	// BeginTurn serializes concurrent chat requests atomically; without it
 	// two racing POSTs could both pass a plain status check and interleave
 	// two pipelines on one session.
-	prev, ok, err := s.store.BeginTurn(id)
+	prev, ok, err := s.store.BeginTurn(user, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -321,15 +386,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := session.Message{Role: "user", Content: strings.TrimSpace(req.Message), At: time.Now()}
-	if err := s.store.AppendMessage(id, msg); err != nil {
+	if err := s.store.AppendMessage(user, id, msg); err != nil {
 		// The session is "building" but no pipeline owns it; roll back so
 		// the next request is not rejected forever.
-		_ = s.store.SetStatus(id, prev)
+		_ = s.store.SetStatus(user, id, prev)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.pipeline.EmitUserMessage(id, msg)
-	s.runPipeline(id)
+	s.pipeline.EmitUserMessage(user, id, msg)
+	s.runPipeline(user, id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
 }
 
@@ -337,14 +402,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // public, credential-free URL /app/{id}/ now serves this version.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.store.Load(id); err != nil {
+	user := s.requestUser(r)
+	if _, err := s.store.Load(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	// Claim the session atomically: a chat turn starting mid-publish would
 	// otherwise race this rebuild for the same distDir. The session shows
 	// "building" for the duration, which also 409s chat requests.
-	prev, ok, err := s.store.BeginTurn(id)
+	prev, ok, err := s.store.BeginTurn(user, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -353,8 +419,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
 		return
 	}
-	restore := func() { _ = s.store.SetStatus(id, prev) }
-	appDir, err := s.appDir(id)
+	restore := func() { _ = s.store.SetStatus(user, id, prev) }
+	appDir, err := s.appDir(user, id)
 	if err != nil {
 		restore()
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -365,7 +431,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no app to publish yet")
 		return
 	}
-	ws, err := s.workspaceDir(id)
+	ws, err := s.workspaceDir(user, id)
 	if err != nil {
 		restore()
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -404,7 +470,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "activate new dist: "+err.Error())
 		return
 	}
-	pub, err := s.store.RecordPublish(id, "/app/"+id+"/")
+	pub, err := s.store.RecordPublish(user, id, "/app/"+id+"/")
 	if err != nil {
 		// The new dist has no matching record; never let /app serve an
 		// unrecorded version — put the last recorded one back.
@@ -419,13 +485,13 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = os.RemoveAll(bakDir)
-	_ = s.store.SetStatus(id, "ready")
+	_ = s.store.SetStatus(user, id, "ready")
 	writeJSON(w, http.StatusOK, pub)
 }
 
 // handleGetPublishes returns the full publish history, oldest first.
 func (s *Server) handleGetPublishes(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.store.Load(r.PathValue("id"))
+	sess, err := s.store.Load(s.requestUser(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -435,6 +501,7 @@ func (s *Server) handleGetPublishes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	user := s.requestUser(r)
 	after := 0
 	if v := r.URL.Query().Get("after"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -444,7 +511,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		after = n
 	}
-	sess, err := s.store.Load(id)
+	sess, err := s.store.Load(user, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

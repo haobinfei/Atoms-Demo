@@ -170,7 +170,7 @@ func TestPublishFailedRebuildKeepsServingDist(t *testing.T) {
 
 	// Corrupt the entry file in the import graph: esbuild cannot resolve
 	// the import, so the rebuild fails.
-	mainTSX := filepath.Join(dir, id, "app", "src", "main.tsx")
+	mainTSX := filepath.Join(dir, "dev-user", id, "app", "src", "main.tsx")
 	if err := os.WriteFile(mainTSX, []byte(`import "./nope"`), 0o644); err != nil {
 		t.Fatalf("corrupt sources: %v", err)
 	}

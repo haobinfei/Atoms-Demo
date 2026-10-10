@@ -39,6 +39,13 @@ export async function getSession(id: string): Promise<Session> {
   return (await resp.json()) as Session
 }
 
+export async function getMe(): Promise<string> {
+  const resp = await fetch('/api/me')
+  if (!resp.ok) throw new Error(`me: ${resp.status}`)
+  const data = (await resp.json()) as { user: string }
+  return data.user
+}
+
 export async function chatSession(id: string, message: string): Promise<void> {
   const resp = await fetch(`/api/sessions/${id}/chat`, {
     method: 'POST',

@@ -25,6 +25,7 @@ body {
 
 /* ---------- Home ---------- */
 .home {
+  position: relative;
   max-width: 720px;
   margin: 0 auto;
   padding: 15vh 24px 48px;
@@ -277,6 +278,30 @@ body {
 .ws-chat-error {
   color: #ef4444;
   font-size: 12px;
+}
+
+.auth-gate {
+  align-items: center;
+  color: var(--text-dim);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+}
+
+.home-user {
+  color: var(--text-dim);
+  font-size: 12px;
+  position: absolute;
+  right: 20px;
+  top: 16px;
+}
+
+.ws-user {
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-right: 4px;
 }
 
 /* ---------- Publish ---------- */

@@ -1,5 +1,7 @@
 // Package session owns the 会话 (Session) aggregate: a workspace on disk
-// holding generated files, message history and the agent event log.
+// holding generated files, message history and the agent event log. Every
+// session belongs to exactly one owner (a JWT user id); workspaces are
+// partitioned on disk as workspace/<owner>/<id>.
 package session
 
 import (
@@ -9,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,6 +29,7 @@ type Event struct {
 // Session is one "idea → app" workspace (会话).
 type Session struct {
 	ID        string    `json:"id"`
+	Owner     string    `json:"owner"`
 	Prompt    string    `json:"prompt"`
 	Status    string    `json:"status"` // building | ready | failed
 	CreatedAt time.Time `json:"createdAt"`
@@ -53,7 +57,7 @@ type Message struct {
 	At      time.Time `json:"at"`
 }
 
-// Store persists sessions as workspace/<id>/session.json.
+// Store persists sessions as workspace/<owner>/<id>/session.json.
 type Store struct {
 	dir string
 	mu  sync.Mutex
@@ -65,11 +69,11 @@ func NewStore(dir string) *Store {
 
 func (s *Store) Dir() string { return s.dir }
 
-func (s *Store) Workspace(id string) string {
-	return filepath.Join(s.dir, id)
+func (s *Store) Workspace(owner, id string) string {
+	return filepath.Join(s.dir, owner, id)
 }
 
-func (s *Store) Create(prompt string) (*Session, error) {
+func (s *Store) Create(owner, prompt string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -80,6 +84,7 @@ func (s *Store) Create(prompt string) (*Session, error) {
 	now := time.Now()
 	sess := &Session{
 		ID:        id,
+		Owner:     owner,
 		Prompt:    prompt,
 		Status:    "building",
 		CreatedAt: now,
@@ -87,8 +92,17 @@ func (s *Store) Create(prompt string) (*Session, error) {
 		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
 		Publishes: []Publish{},
 	}
-	if err := os.MkdirAll(s.Workspace(id), 0o755); err != nil {
+	if err := os.MkdirAll(s.Workspace(owner, id), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir workspace: %w", err)
+	}
+	// Public URLs (/app/{id}/) carry no owner, so the random session id is
+	// the capability: a global id→owner index lets the public handler
+	// locate the workspace without authentication.
+	if err := os.MkdirAll(filepath.Join(s.dir, "by-id"), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir id index: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.dir, "by-id", id), []byte(owner), 0o644); err != nil {
+		return nil, fmt.Errorf("index session owner: %w", err)
 	}
 	if err := s.saveLocked(sess); err != nil {
 		return nil, err
@@ -96,14 +110,47 @@ func (s *Store) Create(prompt string) (*Session, error) {
 	return sess, nil
 }
 
-func (s *Store) Load(id string) (*Session, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.loadLocked(id)
+// IndexOwner resolves a session id to its owner via the public-URL index.
+// The returned owner is validated so a tampered index can never steer path
+// resolution outside the workspace.
+func (s *Store) IndexOwner(id string) (string, error) {
+	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return "", fmt.Errorf("invalid id")
+	}
+	data, err := os.ReadFile(filepath.Join(s.dir, "by-id", id))
+	if err != nil {
+		return "", err
+	}
+	owner := strings.TrimSpace(string(data))
+	if !ValidOwner(owner) {
+		return "", fmt.Errorf("invalid owner in index")
+	}
+	return owner, nil
 }
 
-func (s *Store) loadLocked(id string) (*Session, error) {
-	data, err := os.ReadFile(filepath.Join(s.Workspace(id), "session.json"))
+// ValidOwner reports whether name is safe to use as a directory segment.
+func ValidOwner(name string) bool {
+	if name == "" || len(name) > 128 || strings.Contains(name, "..") {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.' || r == '@' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (s *Store) Load(owner, id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadLocked(owner, id)
+}
+
+func (s *Store) loadLocked(owner, id string) (*Session, error) {
+	data, err := os.ReadFile(filepath.Join(s.Workspace(owner, id), "session.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +161,7 @@ func (s *Store) loadLocked(id string) (*Session, error) {
 	return &sess, nil
 }
 
-func (s *Store) Save(sess *Session) error {
+func (s *Store) Save(owner string, sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess.UpdatedAt = time.Now()
@@ -126,14 +173,14 @@ func (s *Store) saveLocked(sess *Session) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.Workspace(sess.ID), "session.json"), data, 0o644)
+	return os.WriteFile(filepath.Join(s.Workspace(sess.Owner, sess.ID), "session.json"), data, 0o644)
 }
 
 // AppendEvent assigns the next sequence number, appends and persists.
-func (s *Store) AppendEvent(id string, ev Event) (Event, error) {
+func (s *Store) AppendEvent(owner, id string, ev Event) (Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.loadLocked(id)
+	sess, err := s.loadLocked(owner, id)
 	if err != nil {
 		return Event{}, err
 	}
@@ -149,10 +196,10 @@ func (s *Store) AppendEvent(id string, ev Event) (Event, error) {
 }
 
 // AppendMessage persists one user utterance to the session timeline.
-func (s *Store) AppendMessage(id string, msg Message) error {
+func (s *Store) AppendMessage(owner, id string, msg Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.loadLocked(id)
+	sess, err := s.loadLocked(owner, id)
 	if err != nil {
 		return err
 	}
@@ -167,10 +214,10 @@ func (s *Store) AppendMessage(id string, msg Message) error {
 // requests serialize instead of racing two pipelines: the first caller wins,
 // later ones see ok=false and must be rejected. prev is the status to
 // restore with SetStatus if the caller fails after winning.
-func (s *Store) BeginTurn(id string) (prev string, ok bool, err error) {
+func (s *Store) BeginTurn(owner, id string) (prev string, ok bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.loadLocked(id)
+	sess, err := s.loadLocked(owner, id)
 	if err != nil {
 		return "", false, err
 	}
@@ -186,10 +233,10 @@ func (s *Store) BeginTurn(id string) (prev string, ok bool, err error) {
 }
 
 // SetStatus overwrites the session status (turn rollback, future admin ops).
-func (s *Store) SetStatus(id, status string) error {
+func (s *Store) SetStatus(owner, id, status string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.loadLocked(id)
+	sess, err := s.loadLocked(owner, id)
 	if err != nil {
 		return err
 	}
@@ -199,10 +246,10 @@ func (s *Store) SetStatus(id, status string) error {
 
 // RecordPublish appends one publish entry, assigning the next version
 // (1-based, gapless) under the store lock.
-func (s *Store) RecordPublish(id, url string) (Publish, error) {
+func (s *Store) RecordPublish(owner, id, url string) (Publish, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.loadLocked(id)
+	sess, err := s.loadLocked(owner, id)
 	if err != nil {
 		return Publish{}, err
 	}

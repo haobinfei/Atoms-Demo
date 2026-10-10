@@ -56,7 +56,7 @@ func TestSessionDegradesToTemplateProvider(t *testing.T) {
 		t.Fatalf("degradation not announced on timeline: %+v", events)
 	}
 
-	app := filepath.Join(dir, out.SessionID, "app", "src", "App.tsx")
+	app := filepath.Join(dir, "dev-user", out.SessionID, "app", "src", "App.tsx")
 	data, err := os.ReadFile(app)
 	if err != nil {
 		t.Fatalf("template files not written: %v", err)

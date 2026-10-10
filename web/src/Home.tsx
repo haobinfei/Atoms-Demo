@@ -8,7 +8,7 @@ const EXAMPLES = [
   '一个设计师的作品集网站',
 ]
 
-export default function Home({ onCreated }: { onCreated: (id: string) => void }) {
+export default function Home({ user, onCreated }: { user: string; onCreated: (id: string) => void }) {
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -27,6 +27,7 @@ export default function Home({ onCreated }: { onCreated: (id: string) => void })
 
   return (
     <div className="home">
+      <div className="home-user">{user}</div>
       <div className="home-brand">Atoms Demo</div>
       <h1 className="home-title">把想法变成可运行的应用</h1>
       <p className="home-subtitle">描述你想构建的应用，一支 AI 团队将为你生成、构建并展示它。</p>
