@@ -74,7 +74,7 @@ export default function Workspace({
       .catch((err) => {
         // A 401 here means the AuthSphere session expired mid-use; the
         // only recovery is a fresh login.
-       	if (isAuthError(err)) redirectToLogin()
+        if (isAuthError(err)) redirectToLogin()
         else console.error('load session failed', err)
       })
 

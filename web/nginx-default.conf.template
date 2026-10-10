@@ -1,0 +1,28 @@
+# Served by the official nginx image, which envsubst's
+# /etc/nginx/templates/*.template before startup: ${ATOMS_SERVER} becomes
+# a literal upstream (compose service or cluster service DNS), so no
+# runtime resolver is needed.
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # SPA fallback for the platform UI.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Backend-owned paths. The SSE event stream lives under /api, so
+    # buffering must stay off for events to reach the browser live.
+    location ~ ^/(api|app|pay)/ {
+        proxy_pass http://${ATOMS_SERVER};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+}

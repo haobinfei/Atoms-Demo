@@ -198,6 +198,12 @@ func (s *Store) loadLocked(owner, id string) (*Session, error) {
 	if err := json.Unmarshal(data, &sess); err != nil {
 		return nil, fmt.Errorf("decode session %s: %w", id, err)
 	}
+	// Sessions written before Events was always initialized can carry
+	// JSON null; normalize at the load boundary so no save ever
+	// re-serializes the null the workspace chokes on.
+	if sess.Events == nil {
+		sess.Events = []Event{}
+	}
 	return &sess, nil
 }
 

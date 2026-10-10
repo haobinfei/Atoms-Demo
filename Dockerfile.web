@@ -1,0 +1,16 @@
+# ---- build stage: tsc typecheck + vite production build ----
+FROM node:26-alpine AS build
+WORKDIR /src
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# ---- runtime: nginx serves the SPA and reverse-proxies the backend ----
+FROM nginx:1.29-alpine
+# Default upstream for docker compose; Kubernetes overrides this with the
+# cluster service DNS via the Helm deployment's env.
+ENV ATMOS_SERVER=server:4173
+COPY web/nginx-default.conf.template /etc/nginx/templates/default.conf.template
+COPY --from=build /src/dist /usr/share/nginx/html
+EXPOSE 80

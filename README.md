@@ -22,7 +22,7 @@ Go 模块化单体（HTTP API + SSE 事件流 + 文件工作区）+ React SPA，
 
 ## 本地开发
 
-要求：Go 1.26+、Node 26+。
+要求：Go 1.25+（见 go.mod）、Node 20+（开发与 E2E 验证用的是 Node 26）。
 
 ```bash
 # 后端（:4173，默认 dev 模式，免登录）

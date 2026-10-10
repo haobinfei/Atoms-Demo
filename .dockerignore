@@ -1,0 +1,9 @@
+.git/
+.github/
+node_modules/
+web/node_modules/
+web/dist/
+e2e/
+workspace/
+*.log
+.env

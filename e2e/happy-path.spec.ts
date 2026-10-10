@@ -38,6 +38,26 @@ test('prompt → timeline → interactive preview → chat turn → refreshed pr
   await frame.getByRole('button', { name: '加入购物车' }).first().click()
   await expect(frame.getByRole('button', { name: '购物车（1）' })).toBeVisible()
 
+  // 预览「刷新」是 iframe 因 key 变化而重建：在 document 捕获阶段监听
+  // 新 iframe 的 load 事件，直接观测重载发生（而非间接推断）。
+  // 监听必须在点击发送之前挂上，回合结束的构建可能很快。
+  const reloaded = page.evaluate(
+    () =>
+      new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 60_000)
+        document.addEventListener(
+          'load',
+          (ev) => {
+            if (ev.target instanceof HTMLIFrameElement) {
+              clearTimeout(timer)
+              resolve(true)
+            }
+          },
+          true,
+        )
+      }),
+  )
+
   // 发起修改回合。
   await page.locator('.ws-chat-form input').fill('把主题色换成绿色，加一句标语')
   await page.locator('.ws-chat-form button[type="submit"]').click()
@@ -45,5 +65,6 @@ test('prompt → timeline → interactive preview → chat turn → refreshed pr
 
   // 第二个完成事件 = 预览已重建刷新，且仍非空白。
   await expect(page.locator('.tl-item.tl-done').nth(1)).toBeVisible({ timeout: 60_000 })
+  expect(await reloaded).toBe(true)
   await expect(frame.getByText('用心挑选的每一款')).toBeVisible()
 })

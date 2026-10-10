@@ -1,0 +1,29 @@
+# 一键全栈：docker compose up --build
+# 复刻本地开发拓扑 —— web(nginx) 伺服 SPA 并反代 /api、/app、/pay 到 server。
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: atoms-demo-server:latest
+    env_file: .env
+    environment:
+      PORT: 4173
+      WORKSPACE_DIR: /workspace
+    volumes:
+      - workspace:/workspace
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: atoms-demo-web:latest
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  workspace:
