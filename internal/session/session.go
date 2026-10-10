@@ -125,6 +125,11 @@ func (s *Store) Create(owner, prompt string) (*Session, error) {
 		CreatedAt: now,
 		UpdatedAt: now,
 		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
+		// Events must be a (possibly empty) array, never JSON null: the
+		// workspace reads sess.events.length while the first turn is
+		// still running, and a null would throw before the SSE stream
+		// opens — freezing the timeline at 构建中.
+		Events:    []Event{},
 		Publishes: []Publish{},
 	}
 	if err := os.MkdirAll(s.Workspace(owner, id), 0o755); err != nil {

@@ -46,9 +46,12 @@ export default function Workspace({
       .then((sess) => {
         if (cancelled) return
         setSession(sess)
-        seenRef.current = sess.events.length
-        setEvents(sess.events)
-        source = openEventStream(sessionId, sess.events.length)
+        // Sessions saved before the events array existed can carry
+        // null; normalize so the timeline never throws mid-setup.
+        const persisted = sess.events ?? []
+        seenRef.current = persisted.length
+        setEvents(persisted)
+        source = openEventStream(sessionId, persisted.length)
         source.onmessage = (msg) => {
           const ev = JSON.parse(msg.data as string) as SessionEvent
           seenRef.current = Math.max(seenRef.current, ev.seq)
@@ -71,7 +74,8 @@ export default function Workspace({
       .catch((err) => {
         // A 401 here means the AuthSphere session expired mid-use; the
         // only recovery is a fresh login.
-        if (isAuthError(err)) redirectToLogin()
+       	if (isAuthError(err)) redirectToLogin()
+        else console.error('load session failed', err)
       })
 
     return () => {
