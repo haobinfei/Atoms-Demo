@@ -22,7 +22,7 @@ type chatRequest struct {
 	Model          string        `json:"model"`
 	Messages       []chatMessage `json:"messages"`
 	MaxTokens      int           `json:"max_tokens,omitempty"`
-	Temperature    float64       `json:"temperature,omitempty"`
+	Temperature    *float64      `json:"temperature,omitempty"`
 	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format,omitempty"`
@@ -47,14 +47,22 @@ type openAIClient struct {
 	apiKey  string
 	model   string
 	http    *http.Client
+	// temperature overrides the request default (0.4); some endpoints
+	// (Kimi Code) reject any value but their fixed one.
+	temperature *float64
 }
 
 func (c *openAIClient) chat(ctx context.Context, messages []chatMessage, maxTokens int, jsonMode bool) (string, error) {
 	reqBody := chatRequest{
-		Model:       c.model,
-		Messages:    messages,
-		MaxTokens:   maxTokens,
-		Temperature: 0.4,
+		Model:     c.model,
+		Messages:  messages,
+		MaxTokens: maxTokens,
+	}
+	if c.temperature != nil {
+		reqBody.Temperature = c.temperature
+	} else {
+		t := 0.4
+		reqBody.Temperature = &t
 	}
 	if jsonMode {
 		reqBody.ResponseFormat = &struct {

@@ -120,8 +120,11 @@ func NewKimi(baseURL, apiKey, model string) *KimiProvider {
 	if model == "" {
 		model = "kimi-for-coding"
 	}
+	// kimi-for-coding only accepts temperature=1.
+	one := 1.0
 	return &KimiProvider{Client: &openAIClient{
-		baseURL: baseURL, apiKey: apiKey, model: model, http: defaultHTTPClient(180 * time.Second),
+		baseURL: baseURL, apiKey: apiKey, model: model, http: defaultHTTPClient(300 * time.Second),
+		temperature: &one,
 	}}
 }
 
