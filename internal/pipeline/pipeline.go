@@ -102,6 +102,14 @@ func (p *Pipeline) EmitContestStatus(owner, id, stage, detail string) {
 	}})
 }
 
+// EmitError puts a failure notice on the timeline, e.g. when contest
+// initialization itself failed.
+func (p *Pipeline) EmitError(owner, id, message string) {
+	p.emit(owner, id, session.Event{Type: "error", Payload: map[string]any{
+		"message": message,
+	}})
+}
+
 // EmitScore publishes Nina's three-dimension verdict for one contestant.
 func (p *Pipeline) EmitScore(owner, id, provider string, scores session.Scores, comment string) {
 	p.emit(owner, id, session.Event{Type: "score", Agent: "nina", Payload: map[string]any{

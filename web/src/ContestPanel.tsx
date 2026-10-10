@@ -14,6 +14,8 @@ export default function ContestPanel({
 }) {
   const [error, setError] = useState(false)
   const [picking, setPicking] = useState('')
+  const allFailed =
+    contest.done && contest.entries.every((entry) => entry.status !== 'ready')
 
   async function choose(provider: string) {
     setPicking(provider)
@@ -34,6 +36,11 @@ export default function ContestPanel({
         {!contest.done && <span className="contest-running">参赛者生成与评分中…</span>}
         {error && <span className="ws-chat-error">操作失败，请稍后重试</span>}
       </div>
+      {allFailed && (
+        <div className="contest-all-failed">
+          全部参赛者已减员，没有可点选的版本。可在左侧对话中描述调整要求，让 AI 重新生成。
+        </div>
+      )}
       <div className="contest-grid">
         {contest.entries.map((entry) => (
           <div key={entry.provider} className={`contest-card contest-${entry.status}`}>

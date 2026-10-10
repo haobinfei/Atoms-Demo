@@ -7,6 +7,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -49,8 +50,23 @@ func scoreWithLLM(ctx context.Context, llm provider.Provider, prompt string, fil
 	for path := range files {
 		paths = append(paths, path)
 	}
+	// Bound the prompt so a huge file set cannot blow the LLM's context
+	// window; truncated contents are enough for a score.
+	const perFileCap, totalCap = 2048, 16384
+	total := 0
 	for _, path := range paths {
-		fmt.Fprintf(&sb, "\n--- %s ---\n%s", path, files[path])
+		content := files[path]
+		if len(content) > perFileCap {
+			content = content[:perFileCap] + "\n…(截断)"
+		}
+		if total+len(content) > totalCap {
+			content = content[:max(0, totalCap-total)]
+		}
+		total += len(content)
+		fmt.Fprintf(&sb, "\n--- %s ---\n%s", path, content)
+		if total >= totalCap {
+			break
+		}
 	}
 	out, err := llm.Generate(ctx, sb.String(), func(string, string) {})
 	if err != nil {
@@ -111,24 +127,41 @@ func clampScore(n int) int {
 // ready and the user picks a winner.
 func (s *Server) runContest(user, id, prompt string) {
 	competitors := s.competitors()
+	// Assign each contestant a unique entry name: two same-named
+	// providers (possible via Config.Competitors) would otherwise race
+	// on the same contest/<name>/{app,dist} directories on disk. The
+	// second "gemma" becomes "gemma-2".
+	counts := make(map[string]int, len(competitors))
+	assigned := make([]string, len(competitors))
 	names := make([]string, 0, len(competitors))
-	for _, c := range competitors {
-		names = append(names, c.Name())
+	for i, c := range competitors {
+		counts[c.Name()]++
+		name := c.Name()
+		if counts[name] > 1 {
+			name = fmt.Sprintf("%s-%d", c.Name(), counts[name])
+		}
+		assigned[i] = name
+		names = append(names, name)
 	}
 	if err := s.store.StartContest(user, id, names); err != nil {
 		slog.Error("start contest", "session", id, "err", err)
+		// Best-effort bail-out so the session cannot strand in
+		// "building" with no contest and no events.
+		_ = s.store.SetStatus(user, id, "failed")
+		s.pipeline.EmitError(user, id, "竞赛初始化失败，请重试")
 		return
 	}
 	s.pipeline.EmitContestStatus(user, id, "start",
 		fmt.Sprintf("竞赛开始：%s 并行生成中", strings.Join(names, "、")))
 
 	var wg sync.WaitGroup
-	for _, c := range competitors {
+	for i, c := range competitors {
 		wg.Add(1)
-		go func(comp provider.Provider) {
+		name := assigned[i]
+		go func(comp provider.Provider, name string) {
 			defer wg.Done()
-			s.runContestant(user, id, prompt, comp)
-		}(c)
+			s.runContestant(user, id, prompt, comp, name)
+		}(c, name)
 	}
 	wg.Wait()
 
@@ -137,8 +170,7 @@ func (s *Server) runContest(user, id, prompt string) {
 
 // runContestant drives one 参赛者: generate → validate → write → build,
 // all under contest/<provider>/ so versions stay independent.
-func (s *Server) runContestant(user, id, prompt string, comp provider.Provider) {
-	name := comp.Name()
+func (s *Server) runContestant(user, id, prompt string, comp provider.Provider, name string) {
 	ws := s.store.Workspace(user, id)
 	appDir := filepath.Join(ws, "contest", name, "app")
 	distDir := filepath.Join(ws, "contest", name, "dist")
@@ -267,39 +299,32 @@ func (s *Server) handleWinner(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "provider is required")
 		return
 	}
-	sess, err := s.store.Load(user, id)
-	if err != nil {
+	if _, err := s.store.Load(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if sess.Contest == nil || !sess.Contest.Done {
-		writeError(w, http.StatusConflict, "contest is still running")
-		return
-	}
-	if sess.Contest.Winner != "" {
-		writeError(w, http.StatusConflict, "winner already picked")
-		return
-	}
-	ready := false
-	for _, entry := range sess.Contest.Entries {
-		if entry.Provider == req.Provider && entry.Status == "ready" {
-			ready = true
+	// Claim the winner atomically under the store lock first; a second
+	// concurrent POST then sees ErrWinnerPicked instead of racing the
+	// file copies below.
+	if err := s.store.ClaimContestWinner(user, id, req.Provider); err != nil {
+		switch {
+		case errors.Is(err, session.ErrNoContest):
+			writeError(w, http.StatusNotFound, "session has no contest")
+		case errors.Is(err, session.ErrContestRunning), errors.Is(err, session.ErrWinnerPicked):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
 		}
-	}
-	if !ready {
-		writeError(w, http.StatusBadRequest, "provider is not a ready contestant")
 		return
 	}
 	ws := s.store.Workspace(user, id)
 	if err := session.CopyDirTree(filepath.Join(ws, "contest", req.Provider, "app"), filepath.Join(ws, "app")); err != nil {
+		_ = s.store.ClearContestWinner(user, id)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := session.CopyDirTree(filepath.Join(ws, "contest", req.Provider, "dist"), filepath.Join(ws, "dist")); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := s.store.PickContestWinner(user, id, req.Provider); err != nil {
+		_ = s.store.ClearContestWinner(user, id)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

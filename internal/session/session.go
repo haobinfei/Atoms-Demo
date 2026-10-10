@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -338,6 +339,58 @@ func (s *Store) PickContestWinner(owner, id, provider string) error {
 	return s.update(owner, id, func(sess *Session) {
 		if sess.Contest != nil {
 			sess.Contest.Winner = provider
+		}
+	})
+}
+
+// Contest claim errors returned by ClaimContestWinner so the HTTP layer
+// can map them onto status codes.
+var (
+	ErrNoContest      = errors.New("session has no contest")
+	ErrContestRunning = errors.New("contest is still running")
+	ErrWinnerPicked   = errors.New("winner already picked")
+	ErrNotReady       = errors.New("provider is not a ready contestant")
+)
+
+// ClaimContestWinner validates and records the user's choice atomically
+// under the store lock, so two concurrent POST /winner requests cannot
+// both pass the checks. The caller installs the winner's files onto the
+// session root afterwards; on failure there it must ClearContestWinner.
+func (s *Store) ClaimContestWinner(owner, id string, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(owner, id)
+	if err != nil {
+		return err
+	}
+	if sess.Contest == nil {
+		return ErrNoContest
+	}
+	if !sess.Contest.Done {
+		return ErrContestRunning
+	}
+	if sess.Contest.Winner != "" {
+		return ErrWinnerPicked
+	}
+	ready := false
+	for _, entry := range sess.Contest.Entries {
+		if entry.Provider == provider && entry.Status == "ready" {
+			ready = true
+		}
+	}
+	if !ready {
+		return ErrNotReady
+	}
+	sess.Contest.Winner = provider
+	return s.saveLocked(sess)
+}
+
+// ClearContestWinner rolls back a claim when installing the winner's
+// files onto the session root failed.
+func (s *Store) ClearContestWinner(owner, id string) error {
+	return s.update(owner, id, func(sess *Session) {
+		if sess.Contest != nil {
+			sess.Contest.Winner = ""
 		}
 	})
 }

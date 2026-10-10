@@ -775,6 +775,15 @@ body {
   font-size: 13px;
 }
 
+.contest-all-failed {
+  background: rgba(239, 68, 68, 0.08);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 10px 16px;
+}
+
 .contest-grid {
   display: grid;
   flex: 1;

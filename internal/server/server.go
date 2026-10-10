@@ -220,6 +220,24 @@ func safeJoin(root, rel string) (string, error) {
 
 // handleApp serves the built dist of a session: the live preview URL and
 // (later) the published URL. Publicly accessible, no auth.
+// validProviderSegment reports whether name is safe as a contest
+// archive directory segment. Provider names come from Provider.Name()
+// (e.g. "deepseek", "gemma", "template"); the rules mirror
+// session.ValidOwner but live here so the two domains stay decoupled.
+func validProviderSegment(name string) bool {
+	if name == "" || len(name) > 64 || strings.Contains(name, "..") {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	// /app is shared publicly: no user on the context, so the owner is
@@ -239,12 +257,12 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	// stay publicly reviewable at /app/{id}/contest/{provider}/.
 	rel := r.PathValue("path")
 	if rest, found := strings.CutPrefix(rel, "contest/"); found {
-		provider, sub, ok := strings.Cut(rest, "/")
-		if !ok || !session.ValidOwner(provider) {
+		prov, sub, ok := strings.Cut(rest, "/")
+		if !ok || !validProviderSegment(prov) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		dist = filepath.Join(ws, "contest", provider, "dist")
+		dist = filepath.Join(ws, "contest", prov, "dist")
 		rel = sub
 	}
 	full := filepath.Join(dist, rel)
