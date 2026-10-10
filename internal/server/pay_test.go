@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/server"
@@ -113,6 +114,15 @@ func TestPayFullLoop(t *testing.T) {
 	if err := json.Unmarshal(raw, &list); err != nil || len(list) != 1 || list[0].Status != "paid" {
 		t.Fatalf("list after pay = %s", raw)
 	}
+
+	// 不带空格的测试卡号同样受理（归一化路径的正向断言）。
+	_, second := placeOrder(t, ts.URL,
+		fmt.Sprintf(`{"app":%q,"items":[{"name":"意式浓缩","price":18,"qty":1}]}`, id))
+	code, raw = postRaw(t, ts.URL+"/api/pay/orders/"+second.ID+"/pay?app="+id,
+		`{"card":"4242424242424242"}`)
+	if code != http.StatusOK {
+		t.Fatalf("pay with bare card status = %d, body = %s", code, raw)
+	}
 }
 
 // TestPayOrdersPersistAcrossRestart: 订单随会话落盘，新进程（新设备/
@@ -213,4 +223,78 @@ func get(t *testing.T, url string) (int, []byte) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, raw
+}
+
+// TestPayAPIPublicUnderOIDC: behind AuthSphere, session APIs still demand
+// a JWT but the 模拟收银台 stays public — a shared app's visitor must
+// place and list orders without logging in (review finding on #10).
+func TestPayAPIPublicUnderOIDC(t *testing.T) {
+	env := newAuthTestServer(t)
+	tok := env.token(t, "user-a")
+
+	// Sanity: the auth gate itself is intact for session APIs.
+	if resp, err := http.Post(env.ts.URL+"/api/sessions", "application/json",
+		strings.NewReader(`{"prompt":"一家咖啡店"}`)); err != nil {
+		t.Fatalf("unauthenticated create: %v", err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated create status = %d, want 401", resp.StatusCode)
+		}
+	}
+	// Unknown app resolves to 404, not the gate's 401.
+	if code, _ := get(t, env.ts.URL+"/api/pay/orders?app=nope00"); code != http.StatusNotFound {
+		t.Fatalf("public pay list status = %d, want 404", code)
+	}
+
+	// Owner creates an ecommerce session over the authed API.
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/sessions",
+		strings.NewReader(`{"prompt":"一家咖啡店的电商网站"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authed create: %v", err)
+	}
+	var created struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+	id := created.SessionID
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		r := getWithToken(t, env.ts.URL+"/api/sessions/"+id, tok)
+		var sess struct {
+			Status string `json:"status"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&sess)
+		r.Body.Close()
+		if sess.Status == "ready" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session never became ready: %s", sess.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The shared visitor (no token) places and lists orders.
+	code, order := placeOrder(t, env.ts.URL,
+		fmt.Sprintf(`{"app":%q,"items":[{"name":"招牌拿铁","price":28,"qty":1}]}`, id))
+	if code != http.StatusOK {
+		t.Fatalf("visitor create order status = %d", code)
+	}
+	if code, _ := postRaw(t, env.ts.URL+"/api/pay/orders/"+order.ID+"/pay?app="+id,
+		`{"card":"4242424242424242"}`); code != http.StatusOK {
+		t.Fatalf("visitor pay status = %d", code)
+	}
+	code, raw := get(t, env.ts.URL+"/api/pay/orders?app="+id)
+	if code != http.StatusOK {
+		t.Fatalf("visitor list status = %d", code)
+	}
+	var list []payOrder
+	if err := json.Unmarshal(raw, &list); err != nil || len(list) != 1 || list[0].Status != "paid" {
+		t.Fatalf("visitor list = %s", raw)
+	}
 }

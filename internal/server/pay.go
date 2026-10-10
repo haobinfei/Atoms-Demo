@@ -29,7 +29,10 @@ func (s *Server) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		App   string     `json:"app"`
 		Items []pay.Item `json:"items"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.App) == "" {
+	// Bound the body: items are capped by the pay store, and the raw
+	// request must not be an unbounded disk-filler either.
+	body := http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(body).Decode(&req); err != nil || strings.TrimSpace(req.App) == "" {
 		writeError(w, http.StatusBadRequest, "app and items are required")
 		return
 	}
@@ -126,6 +129,8 @@ func (s *Server) handlePayCheckout(w http.ResponseWriter, r *http.Request) {
 // checkoutPage renders the mock checkout; the pay endpoint re-checks the
 // card server-side, the page only collects it.
 func checkoutPage(order *pay.Order) string {
+	id := jsString(order.ID)
+	app := jsString(order.App)
 	var rows strings.Builder
 	for _, it := range order.Items {
 		rows.WriteString("<tr><td>" + html.EscapeString(it.Name) + "</td><td>" +
@@ -167,7 +172,7 @@ button{background:#f97316;border:none;border-radius:8px;color:#fff;cursor:pointe
 </div>
 <script>
 document.getElementById('pay').onclick = function () {
-  fetch('/api/pay/orders/` + order.ID + `/pay?app=` + order.App + `', {
+  fetch('/api/pay/orders/` + id + `/pay?app=` + app + `', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ card: document.getElementById('card').value }),
@@ -178,7 +183,7 @@ document.getElementById('pay').onclick = function () {
         : '支付失败（' + resp.status + '），请稍后重试'
       return
     }
-    window.location.href = '/app/` + order.App + `/?paid=` + order.ID + `'
+    window.location.href = '/app/` + app + `/?paid=` + id + `'
   }).catch(function () {
     document.getElementById('err').textContent = '网络错误，请稍后重试'
   })
@@ -186,4 +191,19 @@ document.getElementById('pay').onclick = function () {
 </script>
 </body>
 </html>`
+}
+
+// jsString escapes a value for interpolation into a single-quoted
+// JavaScript string literal. Order ids are hex today, but the escape
+// keeps a future id-character change from becoming a script-context XSS.
+func jsString(s string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`'`, `\'`,
+		`"`, `\"`,
+		"<", `\u003c`,
+		"\n", `\n`,
+		"\r", `\r`,
+	)
+	return replacer.Replace(s)
 }

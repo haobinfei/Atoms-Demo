@@ -86,7 +86,12 @@ func New(ctx context.Context, cfg Config) (*Middleware, error) {
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") ||
-			strings.HasPrefix(r.URL.Path, "/api/auth/") || r.URL.Path == "/api/health" {
+			strings.HasPrefix(r.URL.Path, "/api/auth/") || r.URL.Path == "/api/health" ||
+			// 模拟收银台 (mock checkout) data belongs to the generated
+			// shop, not the session owner: a shared app's visitors must
+			// place and list orders without a login (same public contract
+			// as /app/{id}/).
+			strings.HasPrefix(r.URL.Path, "/api/pay/") {
 			next.ServeHTTP(w, r)
 			return
 		}

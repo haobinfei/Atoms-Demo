@@ -2,7 +2,9 @@
 // records for generated ecommerce apps. Orders persist per session on
 // disk so a shopper on another device or browser sees the same history.
 // Only the platform's test card is accepted and every page says so —
-// no real money moves here.
+// no real money moves here. Mock semantics include trusting each item's
+// unit price from the client: there is no price registry, and nothing is
+// actually charged.
 package pay
 
 import (
@@ -56,6 +58,10 @@ func (o Order) AmountString() string { return trimFloat(o.Amount) }
 
 func trimFloat(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
+// maxItems bounds one order so a malicious client cannot grow the order
+// book without limit.
+const maxItems = 100
+
 var (
 	ErrEmptyItems  = errors.New("items must not be empty")
 	ErrBadItem     = errors.New("item name/price/qty invalid")
@@ -82,7 +88,7 @@ func ordersFile(dir string) string { return filepath.Join(dir, "orders.json") }
 // Create validates the items, computes the amount and appends a pending
 // order to the session's order book.
 func (s *Store) Create(dir, app string, items []Item) (*Order, error) {
-	if len(items) == 0 {
+	if len(items) == 0 || len(items) > maxItems {
 		return nil, ErrEmptyItems
 	}
 	amount := 0.0
