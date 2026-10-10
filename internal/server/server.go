@@ -284,6 +284,12 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not built yet")
 		return
 	}
+	// Dist filenames are not content-hashed, and the preview iframe reloads
+	// the same URLs after every build. Without an explicit policy browsers
+	// fall back to heuristic caching and keep serving the pre-rebuild
+	// bundle, so the preview shows a stale app. no-cache forces a
+	// revalidation round-trip: unchanged files still get a cheap 304.
+	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeFile(w, r, full)
 }
 

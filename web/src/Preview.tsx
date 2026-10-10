@@ -46,7 +46,7 @@ export default function Preview({
       <div className="preview-stage">
         <iframe
           key={`${src ?? 'official'}-${builtAt}-${reloadKey}`}
-          src={src ?? `/app/${sessionId}/`}
+          src={src ?? `/app/${sessionId}/?v=${encodeURIComponent(builtAt)}`}
           className={device === 'mobile' ? 'frame mobile' : 'frame'}
           title="应用预览"
         />

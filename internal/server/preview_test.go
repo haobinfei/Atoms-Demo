@@ -35,6 +35,15 @@ func TestPreviewServesBuiltApp(t *testing.T) {
 		t.Fatalf("bundle not served: %v status=%v", err, js.StatusCode)
 	}
 	js.Body.Close()
+
+	// The preview iframe reloads these URLs after every build; stale cached
+	// bundles would render an outdated app, so responses must be revalidated.
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("index Cache-Control = %q, want no-cache", cc)
+	}
+	if cc := js.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("bundle Cache-Control = %q, want no-cache", cc)
+	}
 }
 
 func TestFileListingContentAndExport(t *testing.T) {
