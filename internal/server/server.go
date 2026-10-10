@@ -155,6 +155,18 @@ func (s *Server) competitors() []provider.Provider {
 		return s.cfg.Competitors
 	}
 	if chain, ok := s.pipeline.Prov.(provider.Chain); ok {
+		// Race real 生成引擎 only: the template fallback is a deterministic
+		// offline guarantee, not a model — as a contestant it adds no
+		// information and would pollute an arena-style comparison.
+		real := make([]provider.Provider, 0, len(chain.Providers))
+		for _, p := range chain.Providers {
+			if p.Name() != "template" {
+				real = append(real, p)
+			}
+		}
+		if len(real) > 0 {
+			return real
+		}
 		return chain.Providers
 	}
 	return []provider.Provider{s.pipeline.Prov}

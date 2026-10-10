@@ -123,6 +123,36 @@ func TestChainFromEnvProbesOutUnreachableLocal(t *testing.T) {
 	}
 }
 
+func TestKimiProviderGeneratesFileSet(t *testing.T) {
+	srv := fakeChatServer(t, `{"files":{"a.tsx":"export default function A(){return <div/>}"}}`)
+	p := provider.NewKimi(srv.URL+"/v1", "sk-test", "")
+	files, err := p.Generate(context.Background(), "一个待办应用", func(string, string) {})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if _, ok := files["a.tsx"]; !ok {
+		t.Fatalf("files missing a.tsx: %v", files)
+	}
+	if p.Name() != "kimi" {
+		t.Fatalf("name = %q, want kimi", p.Name())
+	}
+}
+
+func TestChainFromEnvIncludesKimiWhenKeyed(t *testing.T) {
+	chain := provider.ChainFromEnv(context.Background(), provider.EnvConfig{
+		KimiAPIKey:   "sk-test",
+		KimiBaseURL:  "http://127.0.0.1:1/v1",
+		LocalBaseURL: "http://127.0.0.1:1/v1",
+	})
+	names := provider.Members(chain)
+	if len(names) == 0 || names[0] != "kimi" {
+		t.Fatalf("kimi should head the chain without deepseek: %v", names)
+	}
+	if names[len(names)-1] != "template" {
+		t.Fatalf("template fallback missing: %v", names)
+	}
+}
+
 func TestMembersReflectsChainOrder(t *testing.T) {
 	chain := provider.Chain{Providers: []provider.Provider{
 		provider.NewTemplate(), provider.FakeProvider{},

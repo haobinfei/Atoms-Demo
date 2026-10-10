@@ -106,6 +106,42 @@ func (p *LocalProvider) Generate(ctx context.Context, prompt string, emit func(s
 	return files, nil
 }
 
+// KimiProvider is a third cloud 生成引擎 (Moonshot Kimi, OpenAI-compatible).
+// Same JSON-mode contract as DeepSeekProvider; the key/base URL pair may
+// also point at a self-hosted gateway that fronts Kimi.
+type KimiProvider struct {
+	Client *openAIClient
+}
+
+func NewKimi(baseURL, apiKey, model string) *KimiProvider {
+	if baseURL == "" {
+		baseURL = "https://api.kimi.com/coding/v1"
+	}
+	if model == "" {
+		model = "kimi-for-coding"
+	}
+	return &KimiProvider{Client: &openAIClient{
+		baseURL: baseURL, apiKey: apiKey, model: model, http: defaultHTTPClient(180 * time.Second),
+	}}
+}
+
+func (p *KimiProvider) Name() string { return "kimi" }
+
+func (p *KimiProvider) Generate(ctx context.Context, prompt string, emit func(stage string, detail string)) (FileSet, error) {
+	raw, err := p.Client.chat(ctx, []chatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: prompt},
+	}, 32000, true)
+	if err != nil {
+		return nil, err
+	}
+	files, err := parseFileSet(raw)
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
 // ChainFromEnv builds the ADR-0002 fallback chain from configuration:
 // DeepSeek (if a key is set) → local gemma (if reachable at startup) →
 // TemplateProvider (always, offline guarantee).
@@ -113,6 +149,9 @@ func ChainFromEnv(ctx context.Context, cfg EnvConfig) Provider {
 	var chain []Provider
 	if cfg.DeepSeekAPIKey != "" {
 		chain = append(chain, NewDeepSeek(cfg.DeepSeekBaseURL, cfg.DeepSeekAPIKey, cfg.DeepSeekModel))
+	}
+	if cfg.KimiAPIKey != "" {
+		chain = append(chain, NewKimi(cfg.KimiBaseURL, cfg.KimiAPIKey, cfg.KimiModel))
 	}
 	if cfg.LocalBaseURL != "" {
 		local := NewLocal(cfg.LocalBaseURL, cfg.LocalModel)
@@ -133,6 +172,9 @@ type EnvConfig struct {
 	DeepSeekAPIKey  string
 	DeepSeekBaseURL string
 	DeepSeekModel   string
+	KimiAPIKey      string
+	KimiBaseURL     string
+	KimiModel       string
 	LocalBaseURL    string
 	LocalModel      string
 }
