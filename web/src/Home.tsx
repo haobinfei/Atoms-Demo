@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { createSession } from './api'
+import Dashboard from './Dashboard'
 
 const EXAMPLES = [
   '一家咖啡店的电商网站',
@@ -8,10 +9,17 @@ const EXAMPLES = [
   '一个设计师的作品集网站',
 ]
 
-export default function Home({ user, onCreated }: { user: string; onCreated: (id: string) => void }) {
+export default function Home({
+  user,
+  onCreated,
+}: {
+  user: string
+  onCreated: (id: string) => void
+}) {
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [view, setView] = useState<'new' | 'projects'>('new')
 
   const submit = async (text: string) => {
     if (!text.trim() || busy) return
@@ -28,35 +36,49 @@ export default function Home({ user, onCreated }: { user: string; onCreated: (id
   return (
     <div className="home">
       <div className="home-user">{user}</div>
-      <div className="home-brand">Atoms Demo</div>
-      <h1 className="home-title">把想法变成可运行的应用</h1>
-      <p className="home-subtitle">描述你想构建的应用，一支 AI 团队将为你生成、构建并展示它。</p>
-      <form
-        className="home-composer"
-        onSubmit={(e) => {
-          e.preventDefault()
-          void submit(prompt)
-        }}
-      >
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="例如：一家咖啡店的电商网站，能浏览商品、加入购物车…"
-          rows={3}
-          autoFocus
-        />
-        <button type="submit" disabled={busy}>
-          {busy ? '创建中…' : '开始构建'}
+      <nav className="home-tabs">
+        <button className={view === 'new' ? 'on' : ''} onClick={() => setView('new')}>
+          新建项目
         </button>
-      </form>
-      {error && <div className="home-error">{error}</div>}
-      <div className="home-examples">
-        {EXAMPLES.map((ex) => (
-          <button key={ex} type="button" className="chip" onClick={() => void submit(ex)}>
-            {ex}
-          </button>
-        ))}
-      </div>
+        <button className={view === 'projects' ? 'on' : ''} onClick={() => setView('projects')}>
+          我的项目
+        </button>
+      </nav>
+      <div className="home-brand">Atoms Demo</div>
+      {view === 'projects' ? (
+        <Dashboard onOpen={onCreated} />
+      ) : (
+        <>
+          <h1 className="home-title">把想法变成可运行的应用</h1>
+          <p className="home-subtitle">描述你想构建的应用，一支 AI 团队将为你生成、构建并展示它。</p>
+          <form
+            className="home-composer"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void submit(prompt)
+            }}
+          >
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="例如：一家咖啡店的电商网站，能浏览商品、加入购物车…"
+              rows={3}
+              autoFocus
+            />
+            <button type="submit" disabled={busy}>
+              {busy ? '创建中…' : '开始构建'}
+            </button>
+          </form>
+          {error && <div className="home-error">{error}</div>}
+          <div className="home-examples">
+            {EXAMPLES.map((ex) => (
+              <button key={ex} type="button" className="chip" onClick={() => void submit(ex)}>
+                {ex}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

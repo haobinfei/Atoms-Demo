@@ -46,6 +46,54 @@ export async function getMe(): Promise<string> {
   return data.user
 }
 
+export interface SessionSummary {
+  id: string
+  name: string
+  category: string
+  status: 'building' | 'ready' | 'failed'
+  pinned: boolean
+  prompt: string
+  updatedAt: string
+}
+
+export async function listSessions(q = ''): Promise<SessionSummary[]> {
+  const suffix = q ? `?q=${encodeURIComponent(q)}` : ''
+  const resp = await fetch(`/api/sessions/list${suffix}`)
+  if (!resp.ok) throw new Error(`list sessions: ${resp.status}`)
+  const data = (await resp.json()) as { sessions: SessionSummary[] }
+  return data.sessions ?? []
+}
+
+export async function renameSession(id: string, name: string): Promise<void> {
+  const resp = await fetch(`/api/sessions/${id}/rename`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!resp.ok) throw new Error(`rename: ${resp.status}`)
+}
+
+export async function pinSession(id: string, pinned: boolean): Promise<void> {
+  const resp = await fetch(`/api/sessions/${id}/pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned }),
+  })
+  if (!resp.ok) throw new Error(`pin: ${resp.status}`)
+}
+
+export async function duplicateSession(id: string): Promise<string> {
+  const resp = await fetch(`/api/sessions/${id}/duplicate`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`duplicate: ${resp.status}`)
+  const data = (await resp.json()) as { sessionId: string }
+  return data.sessionId
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  const resp = await fetch(`/api/sessions/${id}`, { method: 'DELETE' })
+  if (!resp.ok) throw new Error(`delete: ${resp.status}`)
+}
+
 // isAuthError reports whether an API failure was a 401 — the AuthSphere
 // session expired and the browser must go through login again.
 export function isAuthError(e: unknown): boolean {

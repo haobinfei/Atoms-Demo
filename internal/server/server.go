@@ -89,6 +89,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("GET /api/sessions/list", s.handleListSessions)
+	mux.HandleFunc("POST /api/sessions/{id}/rename", s.handleRename)
+	mux.HandleFunc("POST /api/sessions/{id}/pin", s.handlePin)
+	mux.HandleFunc("POST /api/sessions/{id}/duplicate", s.handleDuplicate)
+	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDelete)
 	mux.HandleFunc("POST /api/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /api/sessions/{id}/publish", s.handlePublish)
 	mux.HandleFunc("GET /api/sessions/{id}/publish", s.handleGetPublishes)
@@ -338,6 +343,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The dashboard card shows the 品类 (category) the template engine
+	// recognizes; LLM-only providers fall back to the generic bucket.
+	if sess.Category == "" {
+		loaded, err := s.store.Load(user, sess.ID)
+		if err == nil {
+			loaded.Category = provider.Analyze(loaded.Prompt).Category
+			if err := s.store.Save(user, loaded); err == nil {
+				sess = loaded
+			}
+		}
+	}
 	// The pipeline runs asynchronously and streams events into the
 	// session's event log; see handleEvents.
 	s.runPipeline(user, sess.ID)
@@ -357,6 +373,91 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 // events land in the session's event log and are fanned out to SSE clients.
 func (s *Server) runPipeline(user, id string) {
 	go s.pipeline.Run(context.Background(), user, id)
+}
+
+// handleListSessions returns the current user's sessions for the dashboard:
+// name, category, status, pin — optionally filtered by a ?q= search over
+// name and prompt.
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	user := s.requestUser(r)
+	sessions, err := s.store.List(user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type summary struct {
+		ID        string    `json:"id"`
+		Name      string    `json:"name"`
+		Category  string    `json:"category"`
+		Status    string    `json:"status"`
+		Pinned    bool      `json:"pinned"`
+		Prompt    string    `json:"prompt"`
+		UpdatedAt time.Time `json:"updatedAt"`
+	}
+	out := make([]summary, 0, len(sessions))
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	for _, sess := range sessions {
+		if q != "" && !strings.Contains(sess.Name, q) && !strings.Contains(sess.Prompt, q) {
+			continue
+		}
+		out = append(out, summary{
+			ID: sess.ID, Name: sess.Name, Category: sess.Category,
+			Status: sess.Status, Pinned: sess.Pinned, Prompt: sess.Prompt,
+			UpdatedAt: sess.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})
+}
+
+// handleRename sets the dashboard display name.
+func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := s.store.Rename(s.requestUser(r), r.PathValue("id"), strings.TrimSpace(req.Name)); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handlePin toggles the dashboard pin.
+func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Pinned bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "pinned is required")
+		return
+	}
+	if err := s.store.SetPinned(s.requestUser(r), r.PathValue("id"), req.Pinned); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleDuplicate deep-copies a session into a fresh one.
+func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.Duplicate(s.requestUser(r), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
+}
+
+// handleDelete removes a session and its public-URL index entry.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Delete(s.requestUser(r), r.PathValue("id")); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleChat starts a new 回合 (Turn): the follow-up message lands on the

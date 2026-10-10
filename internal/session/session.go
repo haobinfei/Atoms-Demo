@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,9 @@ type Event struct {
 type Session struct {
 	ID        string    `json:"id"`
 	Owner     string    `json:"owner"`
+	Name      string    `json:"name"`
+	Category  string    `json:"category"`
+	Pinned    bool      `json:"pinned"`
 	Prompt    string    `json:"prompt"`
 	Status    string    `json:"status"` // building | ready | failed
 	CreatedAt time.Time `json:"createdAt"`
@@ -88,6 +92,7 @@ func (s *Store) Create(owner, prompt string) (*Session, error) {
 	sess := &Session{
 		ID:        id,
 		Owner:     owner,
+		Name:      prompt,
 		Prompt:    prompt,
 		Status:    "building",
 		CreatedAt: now,
@@ -262,6 +267,149 @@ func (s *Store) RecordPublish(owner, id, url string) (Publish, error) {
 		return Publish{}, err
 	}
 	return pub, nil
+}
+
+// List returns all sessions of one owner: pinned first, then newest
+// update first.
+func (s *Store) List(owner string) ([]Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := os.ReadDir(filepath.Join(s.dir, owner))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []Session{}, nil
+		}
+		return nil, err
+	}
+	out := make([]Session, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sess, err := s.loadLocked(owner, entry.Name())
+		if err != nil {
+			continue // partially written workspace; skip
+		}
+		out = append(out, *sess)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Pinned != out[j].Pinned {
+			return out[i].Pinned
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
+// Rename sets the display name of a session.
+func (s *Store) Rename(owner, id, name string) error {
+	return s.update(owner, id, func(sess *Session) {
+		sess.Name = name
+	})
+}
+
+// SetPinned toggles the pin that floats a session to the dashboard front.
+func (s *Store) SetPinned(owner, id string, pinned bool) error {
+	return s.update(owner, id, func(sess *Session) {
+		sess.Pinned = pinned
+	})
+}
+
+func (s *Store) update(owner, id string, mutate func(*Session)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(owner, id)
+	if err != nil {
+		return err
+	}
+	mutate(sess)
+	return s.saveLocked(sess)
+}
+
+// Duplicate deep-copies a session under a fresh id: history and generated
+// files travel along, publish records reset (the public URL is id-based).
+func (s *Store) Duplicate(owner, id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src, err := s.loadLocked(owner, id)
+	if err != nil {
+		return nil, err
+	}
+	newID, err := newID()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	dst := &Session{
+		ID:        newID,
+		Owner:     owner,
+		Name:      "副本 · " + src.Name,
+		Category:  src.Category,
+		Prompt:    src.Prompt,
+		Status:    src.Status,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Messages:  src.Messages,
+		Events:    src.Events,
+		Publishes: []Publish{},
+	}
+	if err := os.MkdirAll(s.Workspace(owner, newID), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(s.dir, "by-id", newID), []byte(owner), 0o644); err != nil {
+		return nil, fmt.Errorf("index session owner: %w", err)
+	}
+	if err := s.saveLocked(dst); err != nil {
+		return nil, err
+	}
+	// Best-effort copy of the generated app and dist so the copy previews
+	// immediately; a missed file only means the next turn rebuilds it.
+	for _, sub := range []string{"app", "dist"} {
+		_ = copyDirTree(filepath.Join(s.Workspace(owner, id), sub), filepath.Join(s.Workspace(owner, newID), sub))
+	}
+	return dst, nil
+}
+
+// Delete removes the workspace and the public-URL index entry.
+func (s *Store) Delete(owner, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("invalid id")
+	}
+	if _, err := s.loadLocked(owner, id); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(s.Workspace(owner, id)); err != nil {
+		return err
+	}
+	return os.Remove(filepath.Join(s.dir, "by-id", id))
+}
+
+// copyDirTree copies a whole directory tree; a missing source is not an
+// error (e.g. a failed session has no dist yet).
+func copyDirTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
 }
 
 func newID() (string, error) {

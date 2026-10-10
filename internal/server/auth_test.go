@@ -250,6 +250,20 @@ func TestUserIsolation(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	resp.Body.Close()
+
+	// The dashboard list is owner-scoped: user-b sees nothing.
+	foreignList := getWithToken(t, e.ts.URL+"/api/sessions/list", e.token(t, "user-b"))
+	var listOut struct {
+		Sessions []any `json:"sessions"`
+	}
+	if err := json.NewDecoder(foreignList.Body).Decode(&listOut); err != nil {
+		t.Fatalf("decode foreign list: %v", err)
+	}
+	foreignList.Body.Close()
+	if len(listOut.Sessions) != 0 {
+		t.Fatalf("foreign list len = %d, want 0", len(listOut.Sessions))
+	}
 
 	// user-a can read it; user-b gets a plain 404 (no existence leak).
 	own := getWithToken(t, e.ts.URL+"/api/sessions/"+out.SessionID, e.token(t, "user-a"))
