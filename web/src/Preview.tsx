@@ -3,11 +3,14 @@ import { useState } from 'react'
 export default function Preview({
   sessionId,
   builtAt,
+  src,
 }: {
   sessionId: string
   // Changes after every successful build; used as the iframe key so the
   // preview reloads automatically when a turn finishes.
   builtAt: string
+  // Optional override, e.g. a contest loser's archived version.
+  src?: string
 }) {
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [reloadKey, setReloadKey] = useState(0)
@@ -42,8 +45,8 @@ export default function Preview({
       </div>
       <div className="preview-stage">
         <iframe
-          key={`${builtAt}-${reloadKey}`}
-          src={`/app/${sessionId}/`}
+          key={`${src ?? 'official'}-${builtAt}-${reloadKey}`}
+          src={src ?? `/app/${sessionId}/`}
           className={device === 'mobile' ? 'frame mobile' : 'frame'}
           title="应用预览"
         />

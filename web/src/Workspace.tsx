@@ -12,6 +12,7 @@ import FilesDrawer from './FilesDrawer'
 import Preview from './Preview'
 import PublishPanel from './PublishPanel'
 import Timeline from './Timeline'
+import ContestPanel from './ContestPanel'
 
 const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主题改成橙色']
 
@@ -32,6 +33,7 @@ export default function Workspace({
   const [chatText, setChatText] = useState('')
   const [sending, setSending] = useState(false)
   const [chatError, setChatError] = useState(false)
+  const [reviewVersion, setReviewVersion] = useState('')
   const seenRef = useRef(0)
   const busy = (session?.status ?? 'building') === 'building' || sending
 
@@ -55,6 +57,11 @@ export default function Workspace({
             const status = ((ev.payload?.status as string) ?? 'ready') as Session['status']
             setSession((prev) => (prev ? { ...prev, status } : prev))
             if (status === 'ready') setBuiltAt(new Date().toISOString())
+          }
+          if (ev.type === 'contest' || ev.type === 'score' || ev.type === 'done') {
+            // Contest progress lives on the session; refetch so the
+            // score cards and entry statuses stay in sync.
+            void getSession(sessionId).then(setSession).catch(() => {})
           }
         }
         source.onerror = () => {
@@ -159,7 +166,44 @@ export default function Workspace({
           </div>
         </aside>
         <main className="ws-preview">
-          <Preview sessionId={sessionId} builtAt={builtAt} />
+          {session?.contest && !session.contest.winner ? (
+            <ContestPanel
+              sessionId={sessionId}
+              contest={session.contest}
+              onPicked={(provider) => {
+                setSession((prev) =>
+                  prev?.contest
+                    ? { ...prev, contest: { ...prev.contest, winner: provider } }
+                    : prev,
+                )
+                setBuiltAt(new Date().toISOString())
+              }}
+            />
+          ) : (
+            <>
+              {session?.contest && (
+                <div className="ws-version-bar">
+                  <select value={reviewVersion} onChange={(e) => setReviewVersion(e.target.value)}>
+                    <option value="">
+                      正式版{session.contest.winner ? `（${session.contest.winner}）` : ''}
+                    </option>
+                    {session.contest.entries
+                      .filter((e) => e.status === 'ready' && e.provider !== session.contest?.winner)
+                      .map((e) => (
+                        <option key={e.provider} value={e.provider}>
+                          回看 {e.provider}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+              <Preview
+                sessionId={sessionId}
+                builtAt={builtAt}
+                src={reviewVersion ? `/app/${sessionId}/contest/${reviewVersion}/` : undefined}
+              />
+            </>
+          )}
         </main>
       </div>
       <FilesDrawer sessionId={sessionId} open={filesOpen} onClose={() => setFilesOpen(false)} />

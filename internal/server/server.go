@@ -37,6 +37,12 @@ type Config struct {
 	Prov provider.Provider
 	// Env configures the fallback chain when Prov is nil.
 	Env provider.EnvConfig
+	// Competitors are the 参赛者 for 竞赛 (Competition) mode; defaults to
+	// the members of the fallback chain (gemma 离线时自动减员).
+	Competitors []provider.Provider
+	// ScoreFunc is Nina's scoring brain; defaults to LLM with a
+	// deterministic heuristic fallback.
+	ScoreFunc ScoreFunc
 }
 
 type Server struct {
@@ -95,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/duplicate", s.handleDuplicate)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDelete)
 	mux.HandleFunc("POST /api/sessions/{id}/chat", s.handleChat)
+	mux.HandleFunc("POST /api/sessions/{id}/winner", s.handleWinner)
 	mux.HandleFunc("POST /api/sessions/{id}/publish", s.handlePublish)
 	mux.HandleFunc("GET /api/sessions/{id}/publish", s.handleGetPublishes)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
@@ -131,6 +138,36 @@ func (s *Server) requestUser(r *http.Request) string {
 	}
 	v, _ := r.Context().Value(devUserKey{}).(string)
 	return v
+}
+
+// competitors resolves the 参赛者 list: explicit config wins; otherwise
+// the fallback chain's members race each other (a probed-out local LLM
+// simply never appears — graceful 减员).
+func (s *Server) competitors() []provider.Provider {
+	if len(s.cfg.Competitors) > 0 {
+		return s.cfg.Competitors
+	}
+	if chain, ok := s.pipeline.Prov.(provider.Chain); ok {
+		return chain.Providers
+	}
+	return []provider.Provider{s.pipeline.Prov}
+}
+
+// scoreFunc resolves Nina's scoring brain.
+func (s *Server) scoreFunc() ScoreFunc {
+	if s.cfg.ScoreFunc != nil {
+		return s.cfg.ScoreFunc
+	}
+	var llm provider.Provider
+	if chain, ok := s.pipeline.Prov.(provider.Chain); ok {
+		for _, p := range chain.Providers {
+			if p.Name() != "template" {
+				llm = p
+				break
+			}
+		}
+	}
+	return DefaultScoreFunc(llm)
 }
 
 // handleMe reports who the current request runs as; the web login gate
@@ -198,7 +235,18 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dist := filepath.Join(ws, "dist")
+	// Loser versions of a contest live under contest/<provider>/dist and
+	// stay publicly reviewable at /app/{id}/contest/{provider}/.
 	rel := r.PathValue("path")
+	if rest, found := strings.CutPrefix(rel, "contest/"); found {
+		provider, sub, ok := strings.Cut(rest, "/")
+		if !ok || !session.ValidOwner(provider) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		dist = filepath.Join(ws, "contest", provider, "dist")
+		rel = sub
+	}
 	full := filepath.Join(dist, rel)
 	if rel == "" {
 		full = filepath.Join(dist, "index.html")
@@ -331,7 +379,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Prompt string `json:"prompt"`
+		Prompt      string `json:"prompt"`
+		Competition bool   `json:"competition"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Prompt) == "" {
 		writeError(w, http.StatusBadRequest, "prompt is required")
@@ -345,18 +394,20 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// The dashboard card shows the 品类 (category) the template engine
 	// recognizes; LLM-only providers fall back to the generic bucket.
-	if sess.Category == "" {
-		loaded, err := s.store.Load(user, sess.ID)
-		if err == nil {
-			loaded.Category = provider.Analyze(loaded.Prompt).Category
-			if err := s.store.Save(user, loaded); err == nil {
-				sess = loaded
-			}
+	loaded, err := s.store.Load(user, sess.ID)
+	if err == nil {
+		loaded.Category = provider.Analyze(loaded.Prompt).Category
+		if err := s.store.Save(user, loaded); err == nil {
+			sess = loaded
 		}
 	}
-	// The pipeline runs asynchronously and streams events into the
-	// session's event log; see handleEvents.
-	s.runPipeline(user, sess.ID)
+	if req.Competition {
+		go s.runContest(user, sess.ID, sess.Prompt)
+	} else {
+		// The pipeline runs asynchronously and streams events into the
+		// session's event log; see handleEvents.
+		s.runPipeline(user, sess.ID)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
 }
 

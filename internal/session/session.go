@@ -41,6 +41,32 @@ type Session struct {
 	Events    []Event   `json:"events"`
 	Messages  []Message `json:"messages"`
 	Publishes []Publish `json:"publishes"`
+	Contest   *Contest  `json:"contest,omitempty"`
+}
+
+// Scores are Nina's three-dimension verdict on one contest version.
+type Scores struct {
+	Design        int `json:"design"`
+	Functionality int `json:"functionality"`
+	CodeQuality   int `json:"codeQuality"`
+}
+
+// ContestEntry is one 参赛者 (Contestant)'s run: generation, build and
+// (once ready) Nina's score.
+type ContestEntry struct {
+	Provider string  `json:"provider"`
+	Status   string  `json:"status"` // building | ready | failed
+	Scores   *Scores `json:"scores,omitempty"`
+	Comment  string  `json:"comment,omitempty"`
+}
+
+// Contest is one 竞赛 (Competition): parallel generation by several
+// 生成引擎, judged by Nina; the user picks the winner, losers stay
+// archived under contest/<provider>/ for review.
+type Contest struct {
+	Entries []ContestEntry `json:"entries"`
+	Winner  string         `json:"winner,omitempty"`
+	Done    bool           `json:"done"`
 }
 
 // Publish is one 发布 (Publish) of the session's built app: a versioned,
@@ -269,6 +295,53 @@ func (s *Store) RecordPublish(owner, id, url string) (Publish, error) {
 	return pub, nil
 }
 
+// StartContest initializes the contest state with the given 参赛者 names.
+func (s *Store) StartContest(owner, id string, providers []string) error {
+	return s.update(owner, id, func(sess *Session) {
+		sess.Contest = &Contest{Entries: make([]ContestEntry, 0, len(providers))}
+		for _, name := range providers {
+			sess.Contest.Entries = append(sess.Contest.Entries, ContestEntry{
+				Provider: name, Status: "building",
+			})
+		}
+	})
+}
+
+// UpdateContestEntry mutates contestant entries under the store lock —
+// the build goroutines each own one entry, and a stale-copy save here
+// would drop sibling updates. Every entry with a matching provider name
+// is updated, so two same-named contestants cannot wedge each other.
+func (s *Store) UpdateContestEntry(owner, id, provider string, mutate func(*ContestEntry)) error {
+	return s.update(owner, id, func(sess *Session) {
+		if sess.Contest == nil {
+			return
+		}
+		for i := range sess.Contest.Entries {
+			if sess.Contest.Entries[i].Provider == provider {
+				mutate(&sess.Contest.Entries[i])
+			}
+		}
+	})
+}
+
+// FinishContest marks the contest scored and done.
+func (s *Store) FinishContest(owner, id string) error {
+	return s.update(owner, id, func(sess *Session) {
+		if sess.Contest != nil {
+			sess.Contest.Done = true
+		}
+	})
+}
+
+// PickContestWinner records the user's choice.
+func (s *Store) PickContestWinner(owner, id, provider string) error {
+	return s.update(owner, id, func(sess *Session) {
+		if sess.Contest != nil {
+			sess.Contest.Winner = provider
+		}
+	})
+}
+
 // List returns all sessions of one owner: pinned first, then newest
 // update first. Reading every session.json under the single store lock is
 // a deliberate tradeoff at demo scale — do not copy this pattern onto a
@@ -379,7 +452,7 @@ func (s *Store) Duplicate(owner, id string) (*Session, error) {
 	// Copying while holding the store lock blocks every writer for the
 	// duration; accepted at demo scale (see List).
 	for _, sub := range []string{"app", "dist"} {
-		_ = copyDirTree(filepath.Join(s.Workspace(owner, id), sub), filepath.Join(s.Workspace(owner, newID), sub))
+		_ = CopyDirTree(filepath.Join(s.Workspace(owner, id), sub), filepath.Join(s.Workspace(owner, newID), sub))
 	}
 	return dst, nil
 }
@@ -402,9 +475,9 @@ func (s *Store) Delete(owner, id string) error {
 	return os.Remove(filepath.Join(s.dir, "by-id", id))
 }
 
-// copyDirTree copies a whole directory tree; a missing source is not an
+// CopyDirTree copies a whole directory tree; a missing source is not an
 // error (e.g. a failed session has no dist yet).
-func copyDirTree(src, dst string) error {
+func CopyDirTree(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {

@@ -1,15 +1,35 @@
 export interface SessionEvent {
   seq: number
-  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'done' | 'error' | 'agent' | 'message'
+  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'contest' | 'done' | 'error' | 'agent' | 'message'
   agent?: string
   payload?: Record<string, unknown>
   at: string
 }
 
 export interface ChatMessage {
-  role: 'user'
+  role: 'user' | 'agent'
+  agent?: string
   content: string
   at: string
+}
+
+export interface ContestScores {
+  design: number
+  functionality: number
+  codeQuality: number
+}
+
+export interface ContestEntry {
+  provider: string
+  status: 'building' | 'ready' | 'failed'
+  scores?: ContestScores
+  comment?: string
+}
+
+export interface Contest {
+  entries: ContestEntry[]
+  winner?: string
+  done: boolean
 }
 
 export interface Session {
@@ -20,17 +40,27 @@ export interface Session {
   updatedAt: string
   events: SessionEvent[]
   messages: ChatMessage[]
+  contest?: Contest
 }
 
-export async function createSession(prompt: string): Promise<string> {
+export async function createSession(prompt: string, competition = false): Promise<string> {
   const resp = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, competition }),
   })
   if (!resp.ok) throw new Error(`create session: ${resp.status}`)
   const data = (await resp.json()) as { sessionId: string }
   return data.sessionId
+}
+
+export async function pickWinner(id: string, provider: string): Promise<void> {
+  const resp = await fetch(`/api/sessions/${id}/winner`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider }),
+  })
+  if (!resp.ok) throw new Error(`pick winner: ${resp.status}`)
 }
 
 export async function getSession(id: string): Promise<Session> {

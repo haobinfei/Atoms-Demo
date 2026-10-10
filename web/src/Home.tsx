@@ -21,15 +21,16 @@ export default function Home({
   onCreated: (id: string) => void
 }) {
   const [prompt, setPrompt] = useState('')
+  const [competition, setCompetition] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
-  const submit = async (text: string) => {
+  const submit = async (text: string, contest = false) => {
     if (!text.trim() || busy) return
     setBusy(true)
     setError('')
     try {
-      onCreated(await createSession(text.trim()))
+      onCreated(await createSession(text.trim(), contest))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setBusy(false)
@@ -58,7 +59,7 @@ export default function Home({
             className="home-composer"
             onSubmit={(e) => {
               e.preventDefault()
-              void submit(prompt)
+              void submit(prompt, competition)
             }}
           >
             <textarea
@@ -68,9 +69,19 @@ export default function Home({
               rows={3}
               autoFocus
             />
-            <button type="submit" disabled={busy}>
-              {busy ? '创建中…' : '开始构建'}
-            </button>
+            <div className="home-composer-row">
+              <label className="home-competition">
+                <input
+                  type="checkbox"
+                  checked={competition}
+                  onChange={(e) => setCompetition(e.target.checked)}
+                />
+                竞赛模式（多位 AI 参赛者同台生成，点选胜者）
+              </label>
+              <button type="submit" disabled={busy}>
+                {busy ? '创建中…' : competition ? '开赛' : '开始构建'}
+              </button>
+            </div>
           </form>
           {error && <div className="home-error">{error}</div>}
           <div className="home-examples">

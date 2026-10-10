@@ -93,6 +93,35 @@ func (p *Pipeline) EmitUserMessage(owner, id string, msg session.Message) {
 	}})
 }
 
+// EmitContestStatus announces one 竞赛 (Competition) stage on the timeline:
+// start / a contestant ready / a contestant failed / the winner.
+func (p *Pipeline) EmitContestStatus(owner, id, stage, detail string) {
+	p.emit(owner, id, session.Event{Type: "contest", Agent: "nina", Payload: map[string]any{
+		"stage":  stage,
+		"detail": detail,
+	}})
+}
+
+// EmitScore publishes Nina's three-dimension verdict for one contestant.
+func (p *Pipeline) EmitScore(owner, id, provider string, scores session.Scores, comment string) {
+	p.emit(owner, id, session.Event{Type: "score", Agent: "nina", Payload: map[string]any{
+		"provider":      provider,
+		"design":        scores.Design,
+		"functionality": scores.Functionality,
+		"codeQuality":   scores.CodeQuality,
+		"comment":       comment,
+	}})
+}
+
+// EmitContestDone closes the contest: scoring finished, session ready,
+// waiting for the user's winner pick.
+func (p *Pipeline) EmitContestDone(owner, id string) {
+	p.emit(owner, id, session.Event{Type: "done", Agent: "nina", Payload: map[string]any{
+		"status": "ready",
+		"detail": "评审完成，请点选胜者",
+	}})
+}
+
 // effectivePrompt folds the full 消息历史 and the current file set into the
 // prompt the 生成引擎 sees (ADR-0003). Turn 1 is the bare original idea;
 // later turns re-state the original requirement, the files of the current
