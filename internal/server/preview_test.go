@@ -15,7 +15,7 @@ import (
 func TestPreviewServesBuiltApp(t *testing.T) {
 	ts := newTestServer(t)
 	id := createSession(t, ts.URL, "一个数据看板")
-	readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", 40)
+	readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", 0, 40)
 
 	resp, err := http.Get(ts.URL + "/app/" + id + "/")
 	if err != nil {
@@ -40,7 +40,7 @@ func TestPreviewServesBuiltApp(t *testing.T) {
 func TestFileListingContentAndExport(t *testing.T) {
 	ts := newTestServer(t)
 	id := createSession(t, ts.URL, "一个数据看板")
-	readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", 40)
+	readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", 0, 40)
 
 	// Listing.
 	listResp, err := http.Get(ts.URL + "/api/sessions/" + id + "/files")

@@ -71,6 +71,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("POST /api/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
@@ -286,6 +287,45 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 // events land in the session's event log and are fanned out to SSE clients.
 func (s *Server) runPipeline(id string) {
 	go s.pipeline.Run(context.Background(), id)
+}
+
+// handleChat starts a new 回合 (Turn): the follow-up message lands on the
+// timeline, then the 智能体 team regenerates the whole app against the
+// augmented prompt (original idea + full history).
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+		writeError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+	sess, err := s.store.Load(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.Status == "building" {
+		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
+		return
+	}
+	// Order matters: the session copy below predates the new message, so
+	// the status write must happen before AppendMessage, and each step
+	// re-loads — a stale Save here would silently drop the message.
+	sess.Status = "building"
+	if err := s.store.Save(sess); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	msg := session.Message{Role: "user", Content: strings.TrimSpace(req.Message), At: time.Now()}
+	if err := s.store.AppendMessage(id, msg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.pipeline.EmitUserMessage(id, msg)
+	s.runPipeline(id)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {

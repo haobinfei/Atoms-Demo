@@ -198,8 +198,80 @@ body {
 
 .ws-timeline {
   border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ws-timeline-scroll {
+  flex: 1;
   overflow-y: auto;
   padding: 16px;
+}
+
+.ws-chat {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ws-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ws-chip {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.ws-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ws-chat-form {
+  display: flex;
+  gap: 8px;
+}
+
+.ws-chat-form input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  padding: 8px 12px;
+}
+
+.ws-chat-form input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.ws-chat-form button {
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 8px 16px;
+}
+
+.ws-chat-form button:disabled,
+.ws-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* ---------- Timeline ---------- */

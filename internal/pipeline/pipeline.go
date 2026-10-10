@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,6 +84,37 @@ func (p *Pipeline) emit(id string, ev session.Event) {
 	p.Broker.Publish(id, appended)
 }
 
+// EmitUserMessage puts the user's utterance onto the 事件流 so the
+// timeline shows it as a bubble before the 智能体 team starts the turn.
+func (p *Pipeline) EmitUserMessage(id string, msg session.Message) {
+	p.emit(id, session.Event{Type: "message", Payload: map[string]any{
+		"role":    msg.Role,
+		"content": msg.Content,
+	}})
+}
+
+// effectivePrompt folds the full 消息历史 into the prompt the 生成引擎
+// sees. Turn 1 is the bare original idea; later turns re-state the original
+// requirement plus every follow-up, so a full regeneration still honors
+// both the initial intent and the newest iteration request.
+func effectivePrompt(sess *session.Session) string {
+	var user []string
+	for _, m := range sess.Messages {
+		if m.Role == "user" {
+			user = append(user, m.Content)
+		}
+	}
+	if len(user) <= 1 {
+		return sess.Prompt
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "原始需求：%s\n\n请在保持原始需求不变的前提下，按以下迭代要求重新生成完整应用：", user[0])
+	for i, u := range user[1:] {
+		fmt.Fprintf(&b, "\n%d. %s", i+1, u)
+	}
+	return b.String()
+}
+
 // Run executes the full agent sequence for the session's current prompt.
 func (p *Pipeline) Run(ctx context.Context, id string) {
 	fail := func(err error) {
@@ -138,7 +170,7 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 	if !step("mike", "plan", "拆解需求并制定执行计划") {
 		return nil, ctx.Err()
 	}
-	if !step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", sess.Prompt)) {
+	if !step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", effectivePrompt(sess))) {
 		return nil, ctx.Err()
 	}
 	if !step("bob", "architecture", "设计系统结构：React + TypeScript，组件化组织") {
@@ -146,7 +178,7 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 	}
 
 	var files provider.FileSet
-	files, err = p.Prov.Generate(ctx, sess.Prompt, func(stage, detail string) {
+	files, err = p.Prov.Generate(ctx, effectivePrompt(sess), func(stage, detail string) {
 		if stage == "degrade" {
 			p.emit(id, session.Event{Type: "agent", Agent: "mike", Payload: map[string]any{"detail": detail}})
 		}

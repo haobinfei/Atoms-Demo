@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { getSession, openEventStream, type Session, type SessionEvent } from './api'
+import { chatSession, getSession, openEventStream, type Session, type SessionEvent } from './api'
 import FilesDrawer from './FilesDrawer'
 import Preview from './Preview'
 import Timeline from './Timeline'
+
+const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主题改成橙色']
 
 export default function Workspace({
   sessionId,
@@ -15,7 +17,10 @@ export default function Workspace({
   const [events, setEvents] = useState<SessionEvent[]>([])
   const [builtAt, setBuiltAt] = useState('')
   const [filesOpen, setFilesOpen] = useState(false)
+  const [chatText, setChatText] = useState('')
+  const [sending, setSending] = useState(false)
   const seenRef = useRef(0)
+  const busy = (session?.status ?? 'building') === 'building' || sending
 
   // Load persisted history, then follow the live event stream.
   useEffect(() => {
@@ -52,6 +57,23 @@ export default function Workspace({
   const statusLabel =
     session?.status === 'ready' ? '构建完成' : session?.status === 'failed' ? '构建失败' : '构建中'
 
+  async function sendChat(text: string) {
+    const msg = text.trim()
+    if (!msg || busy) return
+    setSending(true)
+    try {
+      await chatSession(sessionId, msg)
+      setChatText('')
+      // The SSE stream delivers the message event and the new turn; flip
+      // the status immediately so the UI feels responsive.
+      setSession((prev) => (prev ? { ...prev, status: 'building' } : prev))
+    } catch (err) {
+      console.error('chat turn failed', err)
+    } finally {
+      setSending(false)
+    }
+  }
+
   return (
     <div className="workspace">
       <header className="ws-header">
@@ -71,7 +93,40 @@ export default function Workspace({
       </header>
       <div className="ws-body">
         <aside className="ws-timeline">
-          <Timeline events={events} prompt={session?.prompt ?? ''} />
+          <div className="ws-timeline-scroll">
+            <Timeline events={events} prompt={session?.prompt ?? ''} />
+          </div>
+          <div className="ws-chat">
+            <div className="ws-chips">
+              {QUICK_CHIPS.map((chip) => (
+                <button
+                  key={chip}
+                  className="ws-chip"
+                  disabled={busy}
+                  onClick={() => void sendChat(chip)}
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+            <form
+              className="ws-chat-form"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void sendChat(chatText)
+              }}
+            >
+              <input
+                value={chatText}
+                onChange={(e) => setChatText(e.target.value)}
+                placeholder={busy ? '智能体团队工作中…' : '继续描述你想要的变化…'}
+                disabled={busy}
+              />
+              <button type="submit" disabled={busy || !chatText.trim()}>
+                发送
+              </button>
+            </form>
+          </div>
         </aside>
         <main className="ws-preview">
           <Preview sessionId={sessionId} builtAt={builtAt} />

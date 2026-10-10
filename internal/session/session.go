@@ -73,6 +73,7 @@ func (s *Store) Create(prompt string) (*Session, error) {
 		Status:    "building",
 		CreatedAt: now,
 		UpdatedAt: now,
+		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
 	}
 	if err := os.MkdirAll(s.Workspace(id), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir workspace: %w", err)
@@ -133,6 +134,21 @@ func (s *Store) AppendEvent(id string, ev Event) (Event, error) {
 		return Event{}, err
 	}
 	return ev, nil
+}
+
+// AppendMessage persists one user/agent utterance to the session timeline.
+func (s *Store) AppendMessage(id string, msg Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(id)
+	if err != nil {
+		return err
+	}
+	if msg.At.IsZero() {
+		msg.At = time.Now()
+	}
+	sess.Messages = append(sess.Messages, msg)
+	return s.saveLocked(sess)
 }
 
 func newID() (string, error) {

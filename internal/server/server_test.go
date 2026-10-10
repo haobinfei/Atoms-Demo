@@ -12,9 +12,16 @@ import (
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
+	return newTestServerWith(t, provider.FakeProvider{})
+}
+
+// newTestServerWith injects a specific 生成引擎; the template provider is
+// the deterministic choice when the test asserts on prompt-dependent output
+// (e.g. accent color after a chat turn).
+func newTestServerWith(t *testing.T, prov provider.Provider) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
-	srv := server.New(server.Config{WorkspaceDir: dir, DevAuth: true, Prov: provider.FakeProvider{}})
+	srv := server.New(server.Config{WorkspaceDir: dir, DevAuth: true, Prov: prov})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts

@@ -23,6 +23,13 @@ export default function Timeline({ events, prompt }: { events: SessionEvent[]; p
     <div className="timeline">
       <div className="tl-user-bubble">{prompt}</div>
       {events.map((ev, i) => {
+        if (ev.type === 'message') {
+          return (
+            <div key={ev.seq} className="tl-user-bubble">
+              {((ev.payload?.content as string) ?? '')}
+            </div>
+          )
+        }
         const who = persona(ev.agent)
         const prev = i > 0 ? events[i - 1] : null
         const showHeader = !prev || prev.agent !== ev.agent

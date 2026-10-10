@@ -1,8 +1,15 @@
 export interface SessionEvent {
   seq: number
-  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'done' | 'error' | 'agent'
+  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'done' | 'error' | 'agent' | 'message'
   agent?: string
   payload?: Record<string, unknown>
+  at: string
+}
+
+export interface ChatMessage {
+  role: 'user' | 'agent'
+  agent?: string
+  content: string
   at: string
 }
 
@@ -13,7 +20,7 @@ export interface Session {
   createdAt: string
   updatedAt: string
   events: SessionEvent[]
-  messages: unknown[]
+  messages: ChatMessage[]
 }
 
 export async function createSession(prompt: string): Promise<string> {
@@ -31,6 +38,15 @@ export async function getSession(id: string): Promise<Session> {
   const resp = await fetch(`/api/sessions/${id}`)
   if (!resp.ok) throw new Error(`get session: ${resp.status}`)
   return (await resp.json()) as Session
+}
+
+export async function chatSession(id: string, message: string): Promise<void> {
+  const resp = await fetch(`/api/sessions/${id}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  })
+  if (!resp.ok) throw new Error(`chat: ${resp.status}`)
 }
 
 export function openEventStream(id: string, after: number): EventSource {

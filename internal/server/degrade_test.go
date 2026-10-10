@@ -45,7 +45,7 @@ func TestSessionDegradesToTemplateProvider(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	events := readSSEUntilDone(t, ts.URL+"/api/sessions/"+out.SessionID+"/events", 40)
+	events := readSSEUntilDone(t, ts.URL+"/api/sessions/"+out.SessionID+"/events", 0, 40)
 	var sawDegrade bool
 	for _, ev := range events {
 		if ev.Type == "agent" && ev.Agent == "mike" {

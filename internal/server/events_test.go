@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -63,19 +64,23 @@ func createSession(t *testing.T, tsURL, prompt string) string {
 	return out.SessionID
 }
 
-// readSSEUntilDone collects events until one has type "done" (or the cap
-// is hit), so the pipeline goroutine has finished before the test asserts
-// on files and before t.TempDir cleanup runs.
-func readSSEUntilDone(t *testing.T, url string, cap int) []session.Event {
+// readSSEUntilDone collects events (starting after `after`, for cross-turn
+// resume) until one has type "done", so the pipeline goroutine has finished
+// before the test asserts on files and before t.TempDir cleanup runs.
+func readSSEUntilDone(t *testing.T, url string, after, capN int) []session.Event {
 	t.Helper()
-	resp, err := http.Get(url)
+	full := url
+	if after > 0 {
+		full = url + "?after=" + strconv.Itoa(after)
+	}
+	resp, err := http.Get(full)
 	if err != nil {
 		t.Fatalf("open event stream: %v", err)
 	}
 	defer resp.Body.Close()
-	var events []session.Event
+	events := make([]session.Event, 0, capN)
 	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() && len(events) < cap {
+	for scanner.Scan() && len(events) < capN {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -89,7 +94,7 @@ func readSSEUntilDone(t *testing.T, url string, cap int) []session.Event {
 			return events
 		}
 	}
-	t.Fatalf("no done event within %d events", cap)
+	t.Fatalf("no done event within %d events", capN)
 	return nil
 }
 
