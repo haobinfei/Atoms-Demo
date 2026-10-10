@@ -1,63 +1,128 @@
-# 打 v* tag 发版：构建并推送 server/web 镜像到 ghcr.io，然后回写
-# atoms-demo-gitops 的 values.yaml tag —— Argo CD 的 automated sync
-# 检测到 gitops 仓库变更后自动拉起新版本（见 gitops 仓库 README）。
+# 构建与推送对齐 AuthSphere：self-hosted runner（ARC atoms-demo-runner）
+# + 阿里云 ACR + buildx docker driver（宿主 daemon，避免拉 buildkit 镜像）。
+#
+# push main：构建并推送分支/sha 镜像；打 v* tag：额外把镜像版本回写到
+# atoms-demo-gitops 的 values.yaml —— Argo CD automated sync 检测到
+# gitops 仓库变更后自动拉起新版本。
+#
+# 依赖的仓库 Secrets（在 GitHub 仓库 Settings 中配置，值与 AuthSphere 相同）：
+#   ALIYUN_REGISTRY_USERNAME / ALIYUN_REGISTRY_PASSWORD（阿里云 ACR 推送）
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
 
 env:
-  REGISTRY: ghcr.io
+  REGISTRY: registry.cn-hangzhou.aliyuncs.com
+  NAMESPACE: ss-vip
+  SERVER_IMAGE: atoms-demo-server
+  WEB_IMAGE: atoms-demo-web
 
 jobs:
-  images:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+  # ------------------------------
+  # 后端镜像构建与推送
+  # ------------------------------
+  build-server:
+    name: Build Server Image
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+
       - uses: docker/setup-buildx-action@v3
+        with:
+          # 使用宿主机 Docker daemon，避免拉取 moby/buildkit 镜像（国内网络访问 Docker Hub 超时）
+          driver: docker
+
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & push server
-        uses: docker/build-push-action@v6
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.SERVER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=,suffix=,format=short
+
+      - uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.server
           push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 关闭 attestation：buildx 默认附加的 provenance/sbom 会产生 OCI 空层 manifest，
+          # 阿里云 ACR 拒绝（AuthSphere v0.1.0 发版即中过招）
+          provenance: false
+          sbom: false
+
+  # ------------------------------
+  # 前端镜像构建与推送
+  # ------------------------------
+  build-web:
+    name: Build Web Image
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.WEB_IMAGE }}
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/atoms-demo-server:latest
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/atoms-demo-server:${{ github.ref_name }}
-      - name: Build & push web
-        uses: docker/build-push-action@v6
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=,suffix=,format=short
+
+      - uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.web
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/atoms-demo-web:latest
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/atoms-demo-web:${{ github.ref_name }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
 
+  # ------------------------------
+  # 回写 atoms-demo-gitops 镜像版本（仅 tag 触发）
+  # ------------------------------
   bump-gitops:
-    needs: images
-    runs-on: ubuntu-latest
+    name: Bump Image Tags in atoms-demo-gitops
+    runs-on: self-hosted
+    needs: [build-server, build-web]
+    if: github.ref_type == 'tag'
     steps:
-      # 需要 secret GITOPS_TOKEN：对 atoms-demo-gitops 有写权限的 PAT。
-      - name: Checkout gitops repo
-        uses: actions/checkout@v4
+      # 不传 token：checkout 的 https URL 会被 runner 内 /etc/gitconfig 改写为
+      # ssh 别名（见 gitops 仓库 templates/40-actions-runner-controller.yaml），
+      # 用 atoms-demo-gitops 的读写 deploy key（arc-git-ssh secret 内的
+      # id_atoms-demo-gitops）完成认证与推送。
+      - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/atoms-demo-gitops
-          token: ${{ secrets.GITOPS_TOKEN }}
+
       - name: Bump image tags
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           sed -i "s|tag: \".*\"|tag: \"${TAG}\"|g" charts/atoms-demo/values.yaml
-          grep -A3 "  server:" charts/atoms-demo/values.yaml
+          grep -B1 -A3 "  server:" charts/atoms-demo/values.yaml
+
       - name: Commit & push
         run: |
           git config user.name "atoms-release-bot"

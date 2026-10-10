@@ -1,6 +1,9 @@
 # ---- build stage ----
-FROM golang:1.25-alpine AS build
+# 基础镜像统一走阿里云 ACR（集群出网到 Docker Hub / gcr.io 均被断）
+FROM registry.cn-hangzhou.aliyuncs.com/ss-vip/golang:1.25-alpine AS build
 WORKDIR /src
+# Go module 走国内代理（集群访问 proxy.golang.org / github.com 受限）
+RUN go env -w GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -9,13 +12,17 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server && \
     mkdir -p /workspace && chown 65532:65532 /workspace
 
-# ---- runtime: minimal static base, CA certs included, non-root user ----
-FROM gcr.io/distroless/static-debian12:nonroot
+# ---- runtime: minimal base, CA certs included, non-root user ----
+# UID 65532 与 Helm chart 的 fsGroup/runAsNonRoot 保持一致
+FROM registry.cn-hangzhou.aliyuncs.com/ss-vip/alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -g 65532 appuser \
+    && adduser -D -u 65532 -G appuser appuser
 COPY --from=build /out/server /server
 # The volume mountpoint must already belong to the non-root user, or the
 # server cannot create session workspaces under /workspace.
 COPY --from=build --chown=65532:65532 /workspace /workspace
-USER nonroot
+USER appuser
 EXPOSE 4173
 VOLUME ["/workspace"]
 ENV PORT=4173 \
