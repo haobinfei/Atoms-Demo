@@ -1,9 +1,7 @@
 package server_test
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,21 +13,22 @@ import (
 	"github.com/haobinfei/Atoms-Demo/internal/server"
 )
 
-type alwaysBroken struct{}
-
-func (alwaysBroken) Name() string { return "broken-deepseek" }
-func (alwaysBroken) Generate(context.Context, string, func(string, string)) (provider.FileSet, error) {
-	return nil, errors.New("connection refused (simulated)")
-}
-
-// When the primary 生成引擎 fails, the chain must degrade to the template
-// engine, announce it on the timeline, and still land a working app on disk.
+// When the primary 生成引擎 (a real DeepSeek HTTP call against a dead
+// endpoint) fails, the chain must degrade to the template engine, announce
+// it on the timeline, and still land a working app on disk.
 func TestSessionDegradesToTemplateProvider(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer dead.Close()
 	dir := t.TempDir()
 	srv := server.New(server.Config{
 		WorkspaceDir: dir,
 		DevAuth:      true,
-		Prov:         provider.Chain{Providers: []provider.Provider{alwaysBroken{}, provider.NewTemplate()}},
+		Prov: provider.Chain{Providers: []provider.Provider{
+			provider.NewDeepSeek(dead.URL+"/v1", "key", "m"),
+			provider.NewTemplate(),
+		}},
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -64,5 +63,25 @@ func TestSessionDegradesToTemplateProvider(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "购物车") {
 		t.Fatal("ecommerce template content missing")
+	}
+}
+
+// The chain members must be queryable over HTTP so operators can verify
+// e.g. that local gemma was probed out at startup.
+func TestProvidersEndpointListsChainMembers(t *testing.T) {
+	ts := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/api/providers")
+	if err != nil {
+		t.Fatalf("get providers: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Providers []string `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Providers) != 1 || out.Providers[0] != "fake" {
+		t.Fatalf("providers = %v, want [fake]", out.Providers)
 	}
 }

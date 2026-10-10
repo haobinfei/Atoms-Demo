@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"html"
 	"regexp"
 )
 
@@ -13,14 +14,11 @@ type TemplateProvider struct{}
 
 func NewTemplate() *TemplateProvider { return &TemplateProvider{} }
 
-func (TemplateProvider) Name() string { return "template" }
+func (p *TemplateProvider) Name() string { return "template" }
 
 func (p *TemplateProvider) Generate(_ context.Context, prompt string, emit func(stage string, detail string)) (FileSet, error) {
 	spec := Analyze(prompt)
 	files := buildApp(spec)
-	for _, path := range []string{"index.html", "src/main.tsx", "src/App.tsx", "src/styles.css"} {
-		emit("file", path)
-	}
 	return files, nil
 }
 
@@ -110,6 +108,7 @@ func buildApp(spec Spec) FileSet {
 }
 
 func indexHTML(title, accent string) string {
+	title = html.EscapeString(title)
 	return fmt.Sprintf(`<!doctype html>
 <html lang="zh-CN">
   <head>

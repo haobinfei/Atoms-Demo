@@ -40,6 +40,12 @@ func Validate(fs FileSet) error {
 	if len(fs) == 0 {
 		return fmt.Errorf("empty file set")
 	}
+	if _, ok := fs["index.html"]; !ok {
+		return fmt.Errorf("entry file index.html missing")
+	}
+	if _, ok := fs["src/main.tsx"]; !ok {
+		return fmt.Errorf("entry file src/main.tsx missing")
+	}
 	for path, content := range fs {
 		if strings.Contains(path, "..") || filepath.IsAbs(path) || strings.HasPrefix(path, "/") {
 			return fmt.Errorf("unsafe path %q", path)
@@ -76,9 +82,6 @@ func (FakeProvider) Generate(_ context.Context, _ string, emit func(stage string
 		"src/App.tsx":  "export default function App() {\n  return <h1>Hello from FakeProvider</h1>\n}\n",
 		"src/main.tsx": "import { createRoot } from 'react-dom/client'\nimport App from './App'\ncreateRoot(document.getElementById('root')!).render(<App />)\n",
 		"index.html":   "<!doctype html>\n<html><body><div id=\"root\"></div></body></html>\n",
-	}
-	for name := range files {
-		emit("file", name)
 	}
 	return files, nil
 }

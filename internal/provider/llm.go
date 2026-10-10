@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -47,7 +48,11 @@ func (p *DeepSeekProvider) Generate(ctx context.Context, prompt string, emit fun
 	if err != nil {
 		return nil, err
 	}
-	return parseFileSet(raw)
+	files, err := parseFileSet(raw)
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // LocalProvider talks to the home-hosted gemma server
@@ -93,7 +98,11 @@ func (p *LocalProvider) Generate(ctx context.Context, prompt string, emit func(s
 	if err != nil {
 		return nil, err
 	}
-	return parseFileSet(raw)
+	files, err := parseFileSet(raw)
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // ChainFromEnv builds the ADR-0002 fallback chain from configuration:
@@ -107,10 +116,13 @@ func ChainFromEnv(ctx context.Context, cfg EnvConfig) Provider {
 	if cfg.LocalBaseURL != "" {
 		local := NewLocal(cfg.LocalBaseURL, cfg.LocalModel)
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		if err := local.ResolveModel(probeCtx); err == nil {
-			chain = append(chain, local)
-		}
+		err := local.ResolveModel(probeCtx)
 		cancel()
+		if err == nil {
+			chain = append(chain, local)
+		} else {
+			slog.Warn("local llm probe failed, skipping", "base_url", cfg.LocalBaseURL, "err", err)
+		}
 	}
 	chain = append(chain, NewTemplate())
 	return Chain{Providers: chain}

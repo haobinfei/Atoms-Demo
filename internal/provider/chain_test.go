@@ -41,7 +41,12 @@ func TestChainDegradesToFallback(t *testing.T) {
 	broken := &scriptedProvider{name: "broken", results: []providerResult{
 		{err: errors.New("boom")}, {err: errors.New("boom")},
 	}}
-	ok := &scriptedProvider{name: "ok", results: []providerResult{{files: provider.FileSet{"index.html": "<html/>"}}}}
+	ok := &scriptedProvider{name: "ok", results: []providerResult{{files: provider.FileSet{
+		"index.html":     "<html/>",
+		"src/main.tsx":   "import App from './App'",
+		"src/App.tsx":    "export default function A(){return <div/>}",
+		"src/styles.css": "body{}",
+	}}}}
 	rec := &emitRecorder{}
 
 	files, err := (provider.Chain{Providers: []provider.Provider{broken, ok}}).Generate(context.Background(), "x", rec.emit)
@@ -64,7 +69,11 @@ func TestChainDegradesToFallback(t *testing.T) {
 func TestChainRetryRescuesFlakyProvider(t *testing.T) {
 	flaky := &scriptedProvider{name: "flaky", results: []providerResult{
 		{err: errors.New("garbage json")},
-		{files: provider.FileSet{"a.tsx": "export default function A(){return <div/>}"}},
+		{files: provider.FileSet{
+			"index.html":   "<html/>",
+			"src/main.tsx": "import App from './App'",
+			"a.tsx":        "export default function A(){return <div/>}",
+		}},
 	}}
 	rec := &emitRecorder{}
 	files, err := (provider.Chain{Providers: []provider.Provider{flaky}}).Generate(context.Background(), "x", rec.emit)
@@ -96,7 +105,11 @@ func TestValidateRejectsBadImportsAndPaths(t *testing.T) {
 	if err := provider.Validate(traversal); err == nil {
 		t.Fatal("path traversal accepted")
 	}
-	good := provider.FileSet{"src/App.tsx": "import { useState } from 'react'\nexport default function A(){return <div/>}"}
+	good := provider.FileSet{
+		"index.html":   "<html/>",
+		"src/main.tsx": "import App from './App'",
+		"src/App.tsx":  "import { useState } from 'react'\nexport default function A(){return <div/>}",
+	}
 	if err := provider.Validate(good); err != nil {
 		t.Fatalf("valid file set rejected: %v", err)
 	}

@@ -69,7 +69,7 @@ func TestDeepSeekParsesFencedJSON(t *testing.T) {
 func TestChainRetriesDeepSeekOnceThenSucceeds(t *testing.T) {
 	srv := fakeChatServer(t,
 		"sorry, not json at all",
-		`{"files":{"src/App.tsx":"export default function A(){return <div/>}"}}`)
+		`{"files":{"index.html":"<html></html>","src/main.tsx":"import App from './App'","src/App.tsx":"export default function A(){return <div/>}"}}`)
 	ds := provider.NewDeepSeek(srv.URL+"/v1", "key", "m")
 	rec := &emitRecorder{}
 
@@ -104,6 +104,36 @@ func TestLocalProviderResolvesModelFromServer(t *testing.T) {
 	}
 	if p.Name() == "" {
 		t.Fatal("no name")
+	}
+}
+
+func TestChainFromEnvProbesOutUnreachableLocal(t *testing.T) {
+	// Port 1 on localhost is guaranteed closed; the probe must fail fast.
+	chain := provider.ChainFromEnv(context.Background(), provider.EnvConfig{
+		LocalBaseURL: "http://127.0.0.1:1/v1",
+	})
+	names := provider.Members(chain)
+	for _, n := range names {
+		if n == "gemma-local" {
+			t.Fatalf("unreachable gemma still in chain: %v", names)
+		}
+	}
+	if len(names) == 0 || names[len(names)-1] != "template" {
+		t.Fatalf("template fallback missing: %v", names)
+	}
+}
+
+func TestMembersReflectsChainOrder(t *testing.T) {
+	chain := provider.Chain{Providers: []provider.Provider{
+		provider.NewTemplate(), provider.FakeProvider{},
+	}}
+	got := provider.Members(chain)
+	want := []string{"template", "fake"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("members = %v, want %v", got, want)
+	}
+	if m := provider.Members(provider.FakeProvider{}); len(m) != 1 || m[0] != "fake" {
+		t.Fatalf("single provider members = %v", m)
 	}
 }
 

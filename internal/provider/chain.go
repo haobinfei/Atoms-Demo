@@ -6,16 +6,31 @@ package provider
 import (
 	"context"
 	"fmt"
-	"sort"
 )
 
 type Chain struct {
 	Providers []Provider
 }
 
+// Members lists the provider names in fallback order; it works on any
+// Provider, not just Chain, so callers can inspect what was built.
+func Members(p Provider) []string {
+	if c, ok := p.(Chain); ok {
+		names := make([]string, 0, len(c.Providers))
+		for _, prov := range c.Providers {
+			names = append(names, prov.Name())
+		}
+		return names
+	}
+	return []string{p.Name()}
+}
+
 func (c Chain) Name() string { return "chain" }
 
 func (c Chain) Generate(ctx context.Context, prompt string, emit func(stage string, detail string)) (FileSet, error) {
+	if len(c.Providers) == 0 {
+		return nil, fmt.Errorf("no providers configured")
+	}
 	var lastErr error
 	for i, p := range c.Providers {
 		files, err := generateWithRetry(ctx, p, prompt, emit)
@@ -47,24 +62,15 @@ func generateWithRetry(ctx context.Context, p Provider, prompt string, emit func
 			lastErr = err
 			continue
 		}
-		// LLM providers return the whole set at once; announce each file so
-		// the timeline shows writes regardless of which engine produced them.
-		paths := make([]string, 0, len(files))
-		for path := range files {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		for _, path := range paths {
-			emit("file", path)
-		}
 		return files, nil
 	}
 	return nil, lastErr
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n]) + "…"
 }

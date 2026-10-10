@@ -59,10 +59,17 @@ func New(cfg Config) *Server {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	return mux
+}
+
+// handleProviders exposes the 兜底链 members so the UI (and operators) can
+// see which 生成引擎 are active — e.g. whether local gemma was probed out.
+func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"providers": provider.Members(s.pipeline.Prov)})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

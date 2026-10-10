@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -132,19 +133,33 @@ func (p *Pipeline) run(ctx context.Context, id string) (provider.FileSet, error)
 
 	var files provider.FileSet
 	files, err = p.Prov.Generate(ctx, sess.Prompt, func(stage, detail string) {
-		if stage == "file" {
-			p.emit(id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": detail}})
-		} else if stage == "degrade" {
+		if stage == "degrade" {
 			p.emit(id, session.Event{Type: "agent", Agent: "mike", Payload: map[string]any{"detail": detail}})
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
+	// The pipeline alone announces file writes, uniformly for every
+	// 生成引擎 (chain, single LLM provider, or test fake).
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		p.emit(id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": path}})
+	}
 	return files, nil
 }
 
 func (p *Pipeline) writeFiles(id string, files provider.FileSet) error {
+	// Defense in depth: files from a directly-injected Prov (tests, future
+	// bare providers) bypass the chain's validation — enforce it at the
+	// write boundary too.
+	if err := provider.Validate(files); err != nil {
+		return fmt.Errorf("invalid file set: %w", err)
+	}
 	appDir := filepath.Join(p.Store.Workspace(id), "app")
 	for path, content := range files {
 		full := filepath.Join(appDir, filepath.FromSlash(path))
