@@ -77,6 +77,9 @@ func (s *Store) Create(owner, prompt string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !ValidOwner(owner) {
+		return nil, fmt.Errorf("invalid owner")
+	}
 	id, err := newID()
 	if err != nil {
 		return nil, err

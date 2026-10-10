@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -73,9 +74,8 @@ func New(ctx context.Context, cfg Config) (*Middleware, error) {
 	}
 	keySet := oidc.NewRemoteKeySet(ctx, cfg.Issuer+"/.well-known/jwks.json")
 	verifier := oidc.NewVerifier(cfg.Issuer, keySet, &oidc.Config{
-		ClientID:          cfg.ClientID,
-		SkipClientIDCheck: cfg.ClientID == "",
-		SkipIssuerCheck:   cfg.SkipIssuerCheck,
+		ClientID:        cfg.ClientID,
+		SkipIssuerCheck: cfg.SkipIssuerCheck,
 	})
 	return &Middleware{cfg: cfg, verifier: verifier, client: &http.Client{Timeout: 10 * time.Second}}, nil
 }
@@ -85,7 +85,8 @@ func New(ctx context.Context, cfg Config) (*Middleware, error) {
 // Non-/api routes (the SPA, /app/{id}/) pass through untouched.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/api/auth/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/") ||
+			strings.HasPrefix(r.URL.Path, "/api/auth/") || r.URL.Path == "/api/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -101,9 +102,22 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 }
 
 // verifyRequest extracts the token from the Authorization header or the
-// cookie and returns the validated subject.
+// cookie and returns the validated subject. A malformed Authorization
+// header is a hard 401 (no silent cookie fallback); the scheme match is
+// case-insensitive per RFC 7235.
 func (m *Middleware) verifyRequest(r *http.Request) (string, error) {
-	raw := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	authz := r.Header.Get("Authorization")
+	raw := ""
+	if authz != "" {
+		scheme, _, ok := strings.Cut(authz, " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") {
+			return "", fmt.Errorf("malformed authorization header")
+		}
+		raw = strings.TrimSpace(authz[len(scheme)+1:])
+		if raw == "" {
+			return "", fmt.Errorf("empty bearer token")
+		}
+	}
 	if raw == "" {
 		if c, err := r.Cookie(CookieToken); err == nil {
 			raw = c.Value
@@ -166,24 +180,41 @@ func (m *Middleware) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	idToken, err := m.exchange(r.Context(), code)
 	if err != nil {
-		http.Error(w, "token exchange: "+err.Error(), http.StatusBadGateway)
+		// Internal details stay in the log; the browser gets a fixed line.
+		slog.Error("token exchange", "err", err)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
-	if _, err := m.verifier.Verify(r.Context(), idToken); err != nil {
-		http.Error(w, "verify id token: "+err.Error(), http.StatusBadGateway)
+	token, err := m.verifier.Verify(r.Context(), idToken)
+	if err != nil {
+		slog.Error("verify id token from callback", "err", err)
+		http.Error(w, "id token rejected", http.StatusBadGateway)
+		return
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := token.Claims(&claims); err != nil || !session.ValidOwner(claims.Sub) {
+		http.Error(w, "unusable user identity", http.StatusBadGateway)
 		return
 	}
 	m.setCookie(w, CookieToken, idToken, 24*time.Hour)
+	// The nonce is single-use; drop it so a replayed callback URL dies here.
+	m.clearCookie(w, CookieState)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 // exchange swaps the code for tokens at AuthSphere's token endpoint.
 func (m *Middleware) exchange(ctx context.Context, code string) (string, error) {
+	// RFC 6749 §2.3.1: exactly one client authentication method per
+	// request — HTTP Basic here, so client_id stays out of the form.
+	// The credentials go to SetBasicAuth raw; percent-encoding them first
+	// would double-encode (QueryEscape turns '+' into '%2B' etc.) and any
+	// compliant IdP rejects the result.
 	form := url.Values{
 		"grant_type":   {"authorization_code"},
 		"code":         {code},
 		"redirect_uri": {m.cfg.RedirectURL},
-		"client_id":    {m.cfg.ClientID},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.cfg.Issuer+"/oauth/token",
 		strings.NewReader(form.Encode()))
@@ -191,10 +222,10 @@ func (m *Middleware) exchange(ctx context.Context, code string) (string, error) 
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetBasicAuth(url.QueryEscape(m.cfg.ClientID), url.QueryEscape(m.cfg.ClientSecret))
+	req.SetBasicAuth(m.cfg.ClientID, m.cfg.ClientSecret)
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("token request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -220,6 +251,18 @@ func (m *Middleware) setCookie(w http.ResponseWriter, name, value string, ttl ti
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   !m.cfg.InsecureCookies,
+	})
+}
+
+// clearCookie expires a cookie immediately.
+func (m *Middleware) clearCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
 		Secure:   !m.cfg.InsecureCookies,
 	})
 }

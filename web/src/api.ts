@@ -46,6 +46,16 @@ export async function getMe(): Promise<string> {
   return data.user
 }
 
+// isAuthError reports whether an API failure was a 401 — the AuthSphere
+// session expired and the browser must go through login again.
+export function isAuthError(e: unknown): boolean {
+  return e instanceof Error && /\b401\b/.test(e.message)
+}
+
+export function redirectToLogin(): void {
+  window.location.href = '/api/auth/login'
+}
+
 export async function chatSession(id: string, message: string): Promise<void> {
   const resp = await fetch(`/api/sessions/${id}/chat`, {
     method: 'POST',

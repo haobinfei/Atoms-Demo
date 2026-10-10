@@ -13,6 +13,9 @@ import (
 
 func main() {
 	authMode := getenv("AUTH_MODE", "dev")
+	if authMode != "dev" && authMode != "oidc" {
+		log.Fatalf("AUTH_MODE must be \"dev\" or \"oidc\", got %q", authMode)
+	}
 	cfg := server.Config{
 		WorkspaceDir: getenv("WORKSPACE_DIR", "workspace"),
 		DevAuth:      authMode == "dev",

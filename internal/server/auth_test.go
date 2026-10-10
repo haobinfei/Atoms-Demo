@@ -28,6 +28,11 @@ type authEnv struct {
 	priv   *rsa.PrivateKey
 }
 
+// testClientSecret deliberately uses special characters: RFC 6749 Basic
+// credentials must travel raw, so this doubles as a regression test for
+// double percent-encoding in the token exchange.
+const testClientSecret = "sk-test+secret/with=chars"
+
 // newAuthTestServer stands up the full stack behind AuthSphere auth.
 func newAuthTestServer(t *testing.T) *authEnv {
 	t.Helper()
@@ -48,6 +53,11 @@ func newAuthTestServer(t *testing.T) *authEnv {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			id, secret, ok := r.BasicAuth()
+			if !ok || id != "atoms-test" || secret != testClientSecret {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			idToken := signJWT(t, priv, issuerURL(r), "user-a", "atoms-test", time.Hour)
 			writeJSON(w, map[string]any{"id_token": idToken, "token_type": "Bearer"})
 		default:
@@ -59,7 +69,7 @@ func newAuthTestServer(t *testing.T) *authEnv {
 	mw, err := auth.New(context.Background(), auth.Config{
 		Issuer:          issuer.URL,
 		ClientID:        "atoms-test",
-		ClientSecret:    "sk-test",
+		ClientSecret:    testClientSecret,
 		RedirectURL:     "http://localhost:4173/api/auth/callback",
 		InsecureCookies: true,
 	})
@@ -125,6 +135,16 @@ func getWithToken(t *testing.T, rawURL, token string) *http.Response {
 func TestAPIRequiresAuth(t *testing.T) {
 	e := newAuthTestServer(t)
 
+	// The health check stays open for load balancers and container probes.
+	health, err := http.Get(e.ts.URL + "/api/health")
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	health.Body.Close()
+	if health.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d, want 200", health.StatusCode)
+	}
+
 	// Any /api/* call without credentials is a 401…
 	resp, err := http.Get(e.ts.URL + "/api/sessions/whatever")
 	if err != nil {
@@ -151,6 +171,35 @@ func TestAPIRequiresAuth(t *testing.T) {
 	expResp.Body.Close()
 	if expResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expired token status = %d, want 401", expResp.StatusCode)
+	}
+
+	// Wrong audience and wrong issuer are rejected as well.
+	wrongAud := signJWT(t, e.priv, e.issuer.URL, "user-a", "someone-else", time.Hour)
+	audResp := getWithToken(t, e.ts.URL+"/api/sessions/whatever", wrongAud)
+	audResp.Body.Close()
+	if audResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong-aud token status = %d, want 401", audResp.StatusCode)
+	}
+	wrongIss := signJWT(t, e.priv, "http://evil.example", "user-a", "atoms-test", time.Hour)
+	issResp := getWithToken(t, e.ts.URL+"/api/sessions/whatever", wrongIss)
+	issResp.Body.Close()
+	if issResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong-iss token status = %d, want 401", issResp.StatusCode)
+	}
+
+	// A malformed Authorization header is a hard 401, not a cookie fallback.
+	malReq, err := http.NewRequest(http.MethodGet, e.ts.URL+"/api/sessions/whatever", nil)
+	if err != nil {
+		t.Fatalf("build malformed request: %v", err)
+	}
+	malReq.Header.Set("Authorization", "Basic abc")
+	malResp, err := http.DefaultClient.Do(malReq)
+	if err != nil {
+		t.Fatalf("malformed authz: %v", err)
+	}
+	malResp.Body.Close()
+	if malResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("malformed authz status = %d, want 401", malResp.StatusCode)
 	}
 
 	// Login redirects to the issuer's authorize page.
@@ -220,6 +269,13 @@ func TestUserIsolation(t *testing.T) {
 	if events.StatusCode != http.StatusNotFound {
 		t.Fatalf("foreign events status = %d, want 404", events.StatusCode)
 	}
+	for _, path := range []string{"files", "file/src/App.tsx", "export", "publish"} {
+		resp := getWithToken(t, e.ts.URL+"/api/sessions/"+out.SessionID+"/"+path, e.token(t, "user-b"))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("foreign GET %s status = %d, want 404", path, resp.StatusCode)
+		}
+	}
 	chatReq, _ := http.NewRequest(http.MethodPost, e.ts.URL+"/api/sessions/"+out.SessionID+"/chat",
 		strings.NewReader(`{"message":"把主题改成蓝色"}`))
 	chatReq.Header.Set("Content-Type", "application/json")
@@ -270,6 +326,22 @@ func TestCallbackSetsSessionCookie(t *testing.T) {
 	badState.Body.Close()
 	if badState.StatusCode != http.StatusBadRequest {
 		t.Fatalf("callback without state cookie status = %d, want 400", badState.StatusCode)
+	}
+
+	// State cookie present but not matching the callback's state: rejected.
+	mismatchReq, err := http.NewRequest(http.MethodGet,
+		e.ts.URL+"/api/auth/callback?code=good-code&state=forged", nil)
+	if err != nil {
+		t.Fatalf("build mismatch callback: %v", err)
+	}
+	mismatchReq.AddCookie(&http.Cookie{Name: auth.CookieState, Value: "legit-state"})
+	mismatchResp, err := noFollow.Do(mismatchReq)
+	if err != nil {
+		t.Fatalf("mismatch callback: %v", err)
+	}
+	mismatchResp.Body.Close()
+	if mismatchResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("state mismatch status = %d, want 400", mismatchResp.StatusCode)
 	}
 
 	// Full happy path: login to obtain the state cookie, then callback.

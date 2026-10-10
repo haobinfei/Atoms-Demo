@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { chatSession, getSession, openEventStream, type Session, type SessionEvent } from './api'
+import {
+  chatSession,
+  getSession,
+  isAuthError,
+  openEventStream,
+  redirectToLogin,
+  type Session,
+  type SessionEvent,
+} from './api'
 import FilesDrawer from './FilesDrawer'
 import Preview from './Preview'
 import PublishPanel from './PublishPanel'
@@ -32,26 +40,32 @@ export default function Workspace({
     let source: EventSource | null = null
     let cancelled = false
 
-    void getSession(sessionId).then((sess) => {
-      if (cancelled) return
-      setSession(sess)
-      seenRef.current = sess.events.length
-      setEvents(sess.events)
-      source = openEventStream(sessionId, sess.events.length)
-      source.onmessage = (msg) => {
-        const ev = JSON.parse(msg.data as string) as SessionEvent
-        seenRef.current = Math.max(seenRef.current, ev.seq)
-        setEvents((prev) => (prev.some((e) => e.seq === ev.seq) ? prev : [...prev, ev]))
-        if (ev.type === 'done') {
-          const status = ((ev.payload?.status as string) ?? 'ready') as Session['status']
-          setSession((prev) => (prev ? { ...prev, status } : prev))
-          if (status === 'ready') setBuiltAt(new Date().toISOString())
+    void getSession(sessionId)
+      .then((sess) => {
+        if (cancelled) return
+        setSession(sess)
+        seenRef.current = sess.events.length
+        setEvents(sess.events)
+        source = openEventStream(sessionId, sess.events.length)
+        source.onmessage = (msg) => {
+          const ev = JSON.parse(msg.data as string) as SessionEvent
+          seenRef.current = Math.max(seenRef.current, ev.seq)
+          setEvents((prev) => (prev.some((e) => e.seq === ev.seq) ? prev : [...prev, ev]))
+          if (ev.type === 'done') {
+            const status = ((ev.payload?.status as string) ?? 'ready') as Session['status']
+            setSession((prev) => (prev ? { ...prev, status } : prev))
+            if (status === 'ready') setBuiltAt(new Date().toISOString())
+          }
         }
-      }
-      source.onerror = () => {
-        // EventSource auto-reconnects; nothing to do.
-      }
-    })
+        source.onerror = () => {
+          // EventSource auto-reconnects; nothing to do.
+        }
+      })
+      .catch((err) => {
+        // A 401 here means the AuthSphere session expired mid-use; the
+        // only recovery is a fresh login.
+        if (isAuthError(err)) redirectToLogin()
+      })
 
     return () => {
       cancelled = true
@@ -74,6 +88,10 @@ export default function Workspace({
       // the status immediately so the UI feels responsive.
       setSession((prev) => (prev ? { ...prev, status: 'building' } : prev))
     } catch (err) {
+      if (isAuthError(err)) {
+        redirectToLogin()
+        return
+      }
       setChatError(true)
       console.error('chat turn failed', err)
     } finally {
