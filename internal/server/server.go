@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,10 +105,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	after := 0
 	if v := r.URL.Query().Get("after"); v != "" {
-		if _, err := fmt.Sscanf(v, "%d", &after); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
 			writeError(w, http.StatusBadRequest, "invalid after")
 			return
 		}
+		after = n
 	}
 	sess, err := s.store.Load(id)
 	if err != nil {

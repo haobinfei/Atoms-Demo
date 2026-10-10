@@ -6,8 +6,10 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -15,7 +17,10 @@ import (
 )
 
 // Broker fans session events out to connected SSE clients.
+// All three methods are safe for concurrent use: Publish runs on pipeline
+// goroutines, Subscribe/Unsubscribe on SSE handler goroutines.
 type Broker struct {
+	mu          sync.RWMutex
 	subscribers map[string]map[chan session.Event]struct{}
 }
 
@@ -25,6 +30,8 @@ func NewBroker() *Broker {
 
 func (b *Broker) Subscribe(id string) chan session.Event {
 	ch := make(chan session.Event, 16)
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.subscribers[id] == nil {
 		b.subscribers[id] = map[chan session.Event]struct{}{}
 	}
@@ -33,11 +40,18 @@ func (b *Broker) Subscribe(id string) chan session.Event {
 }
 
 func (b *Broker) Unsubscribe(id string, ch chan session.Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	delete(b.subscribers[id], ch)
+	if len(b.subscribers[id]) == 0 {
+		delete(b.subscribers, id)
+	}
 	close(ch)
 }
 
 func (b *Broker) Publish(id string, ev session.Event) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	for ch := range b.subscribers[id] {
 		select {
 		case ch <- ev:
@@ -58,6 +72,7 @@ type Pipeline struct {
 func (p *Pipeline) emit(id string, ev session.Event) {
 	appended, err := p.Store.AppendEvent(id, ev)
 	if err != nil {
+		slog.Error("append event", "session", id, "type", ev.Type, "err", err)
 		return
 	}
 	p.Broker.Publish(id, appended)
@@ -65,16 +80,19 @@ func (p *Pipeline) emit(id string, ev session.Event) {
 
 // Run executes the full agent sequence for the session's current prompt.
 func (p *Pipeline) Run(ctx context.Context, id string) {
+	fail := func(err error) {
+		p.emit(id, session.Event{Type: "error", Payload: map[string]any{"message": err.Error()}})
+	}
 	files, err := p.run(ctx, id)
 	status := "ready"
 	if err != nil {
 		status = "failed"
-		p.emit(id, session.Event{Type: "error", Payload: map[string]any{"message": err.Error()}})
+		fail(err)
 	}
 	if files != nil {
 		if err := p.writeFiles(id, files); err != nil {
 			status = "failed"
-			p.emit(id, session.Event{Type: "error", Payload: map[string]any{"message": err.Error()}})
+			fail(err)
 		}
 	}
 	p.setStatus(id, status)
@@ -141,8 +159,11 @@ func (p *Pipeline) writeFiles(id string, files provider.FileSet) error {
 func (p *Pipeline) setStatus(id, status string) {
 	sess, err := p.Store.Load(id)
 	if err != nil {
+		slog.Error("load session for status update", "session", id, "err", err)
 		return
 	}
 	sess.Status = status
-	_ = p.Store.Save(sess)
+	if err := p.Store.Save(sess); err != nil {
+		slog.Error("save session status", "session", id, "status", status, "err", err)
+	}
 }
