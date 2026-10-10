@@ -308,6 +308,11 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 }
 
 func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet) error {
+	// The AtomsPay SDK is platform-owned: inject it into every app so a
+	// 生成引擎's ecommerce app can import './atomspay' even though the
+	// model never emits the file itself. Non-shop apps never import it
+	// and esbuild tree-shakes it out of the bundle.
+	files[provider.AtomsPaySDKPath] = provider.AtomsPaySDK
 	// Defense in depth: files from a directly-injected Prov (tests, future
 	// bare providers) bypass the chain's validation — enforce it at the
 	// write boundary too.

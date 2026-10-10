@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/evanw/esbuild/pkg/api"
+	"github.com/haobinfei/Atoms-Demo/internal/provider"
 )
 
 //go:embed vendor
@@ -52,7 +53,7 @@ func (b *Builder) Build(appDir, distDir string) error {
 		MinifySyntax:     true,
 		MinifyWhitespace: true,
 		LogLevel:         api.LogLevelSilent,
-		Plugins:          []api.Plugin{vendorPlugin()},
+		Plugins:          []api.Plugin{platformPlugin()},
 		AbsWorkingDir:    appDir,
 		OutExtension:     map[string]string{".js": ".js"},
 		EntryNames:       "[name]",
@@ -99,12 +100,22 @@ func (b *Builder) rewriteIndex(appDir, distDir string) error {
 	return os.WriteFile(filepath.Join(distDir, "index.html"), []byte(html), 0o644)
 }
 
-// vendorPlugin resolves react and react-dom/client from the embedded
-// 供应商目录 instead of node_modules.
-func vendorPlugin() api.Plugin {
+// platformPlugin resolves react and react-dom/client from the embedded
+// 供应商目录 instead of node_modules, and answers './atomspay' imports
+// with the platform-injected AtomsPay SDK so every build path (pipeline,
+// contest, bare builder) can compile ecommerce apps.
+func platformPlugin() api.Plugin {
 	return api.Plugin{
 		Name: "atoms-vendor",
 		Setup: func(build api.PluginBuild) {
+			build.OnResolve(api.OnResolveOptions{Filter: `^\./atomspay(\.ts)?$`},
+				func(args api.OnResolveArgs) (api.OnResolveResult, error) {
+					return api.OnResolveResult{Path: "atomspay", Namespace: "atomspay"}, nil
+				})
+			build.OnLoad(api.OnLoadOptions{Filter: `.*`, Namespace: "atomspay"}, func(args api.OnLoadArgs) (api.OnLoadResult, error) {
+				str := provider.AtomsPaySDK
+				return api.OnLoadResult{Contents: &str, Loader: api.LoaderTS}, nil
+			})
 			vendored := map[string]string{
 				"react":             "react.js",
 				"react/jsx-runtime": "react-jsx-runtime.js",

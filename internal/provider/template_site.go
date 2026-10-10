@@ -1,23 +1,31 @@
 // 电商 (ecommerce) and 站点 (site) templates.
 package provider
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // ---------- 电商 (ecommerce) ----------
 
-var ecommerceProducts = []struct{ Name, Price, Tag string }{
-	{"招牌拿铁", "¥28", "热卖"},
-	{"手冲单品", "¥36", "新豆"},
-	{"冷萃咖啡", "¥32", ""},
-	{"燕麦拿铁", "¥30", ""},
-	{"意式浓缩", "¥18", ""},
-	{"芝士蛋糕", "¥26", "甜点"},
+var ecommerceProducts = []struct {
+	Name  string
+	Price int
+	Tag   string
+}{
+	{"招牌拿铁", 28, "热卖"},
+	{"手冲单品", 36, "新豆"},
+	{"冷萃咖啡", 32, ""},
+	{"燕麦拿铁", 30, ""},
+	{"意式浓缩", 18, ""},
+	{"芝士蛋糕", 26, "甜点"},
 }
 
 func ecommerceApp(spec Spec) (string, string) {
 	app := `import { useEffect, useState } from 'react'
+import { createOrder, listOrders, consumePaidCallback, type PayItem, type PayOrder } from './atomspay'
 
-type Product = { name: string; price: string; tag?: string }
+type Product = { name: string; price: number; tag?: string }
 type CartItem = Product & { qty: number }
 
 const STORAGE = 'app-__NAME__-cart'
@@ -28,8 +36,24 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem(STORAGE) || '[]') } catch { return [] }
   })
   const [open, setOpen] = useState(false)
+  const [orders, setOrders] = useState<PayOrder[]>([])
+  const [paidId, setPaidId] = useState<string | null>(null)
+  const [checkingOut, setCheckingOut] = useState(false)
 
   useEffect(() => { localStorage.setItem(STORAGE, JSON.stringify(cart)) }, [cart])
+
+  // 拉取服务端订单 + 处理平台收银台支付成功回调（?paid=）。
+  useEffect(() => {
+    let alive = true
+    const refresh = () => listOrders().then(os => { if (alive) setOrders(os) }).catch(() => {})
+    refresh()
+    const paid = consumePaidCallback()
+    if (paid) {
+      setPaidId(paid)
+      refresh()
+    }
+    return () => { alive = false }
+  }, [])
 
   const add = (p: Product) => setCart(cs => {
     const hit = cs.find(c => c.name === p.name)
@@ -38,8 +62,18 @@ export default function App() {
   const change = (name: string, d: number) => setCart(cs =>
     cs.map(c => c.name === name ? { ...c, qty: c.qty + d } : c).filter(c => c.qty > 0))
 
-  const total = cart.reduce((s, c) => s + parseFloat(c.price.slice(1)) * c.qty, 0)
+  const total = cart.reduce((s, c) => s + c.price * c.qty, 0)
   const count = cart.reduce((s, c) => s + c.qty, 0)
+
+  // 下单 → 平台模拟收银台；支付成功后由 ?paid= 回调回到本页。
+  const checkout = () => {
+    if (checkingOut || cart.length === 0) return
+    setCheckingOut(true)
+    const items: PayItem[] = cart.map(c => ({ name: c.name, price: c.price, qty: c.qty }))
+    createOrder(items)
+      .then(order => { window.location.href = order.checkoutUrl })
+      .catch(() => { setCheckingOut(false) })
+  }
 
   return (
     <div>
@@ -47,6 +81,7 @@ export default function App() {
         <div className="logo">__NAME__</div>
         <button className="cart-btn" onClick={() => setOpen(true)}>购物车（{count}）</button>
       </header>
+      {paidId && <div className="paid-banner">支付成功，订单列表已更新。</div>}
       <section className="hero">
         <h1>用心挑选的每一款</h1>
         <p>产地直采，新鲜烘焙，48 小时内送达。</p>
@@ -59,7 +94,7 @@ export default function App() {
               {p.name.slice(0, 1)}
             </div>
             <div className="card-body">
-              <div className="row"><b>{p.name}</b><span className="price">{p.price}</span></div>
+              <div className="row"><b>{p.name}</b><span className="price">¥{p.price}</span></div>
               <button className="primary" onClick={() => add(p)}>加入购物车</button>
             </div>
           </article>
@@ -79,15 +114,33 @@ export default function App() {
                   <b>{c.qty}</b>
                   <button onClick={() => change(c.name, 1)}>+</button>
                 </div>
-                <span>¥{(parseFloat(c.price.slice(1)) * c.qty).toFixed(0)}</span>
+                <span>¥{c.price * c.qty}</span>
               </div>
             ))}
             {cart.length > 0 && (
               <>
-                <div className="row total"><b>合计</b><b>¥{total.toFixed(0)}</b></div>
-                <button className="primary wide">去结算</button>
+                <div className="row total"><b>合计</b><b>¥{total}</b></div>
+                <button className="primary wide" disabled={checkingOut} onClick={checkout}>
+                  {checkingOut ? '正在下单…' : '去结算'}
+                </button>
               </>
             )}
+            <h3 className="orders-title">我的订单</h3>
+            {orders.length === 0 && <p className="dim">暂无订单。</p>}
+            {orders.map(o => (
+              <div className="order-row" key={o.id}>
+                <div>
+                  <div className="order-id">订单 {o.id.slice(0, 8)}</div>
+                  <div className="dim">{o.items.map(it => it.name + '×' + it.qty).join('、')}</div>
+                </div>
+                <div className="order-side">
+                  <span className={'badge ' + (o.status === 'paid' ? 'badge-paid' : 'badge-pending')}>
+                    {o.status === 'paid' ? '已支付' : '待支付'}
+                  </span>
+                  <b>¥{o.amount}</b>
+                </div>
+              </div>
+            ))}
           </aside>
         </div>
       )}
@@ -98,7 +151,7 @@ export default function App() {
 	var prod strings.Builder
 	prod.WriteString("[\n")
 	for i, p := range ecommerceProducts {
-		prod.WriteString("  { name: '" + p.Name + "', price: '" + p.Price + "'")
+		prod.WriteString("  { name: '" + p.Name + "', price: " + strconv.Itoa(p.Price))
 		if p.Tag != "" {
 			prod.WriteString(", tag: '" + p.Tag + "'")
 		}
@@ -136,6 +189,14 @@ export default function App() {
 .qty{display:flex;align-items:center;gap:10px}
 .qty button{background:#1f2430;color:var(--text);width:26px;height:26px;border-radius:6px}
 .total{padding-top:14px;font-size:16px}
+.paid-banner{background:rgba(34,197,94,.12);border:1px solid #22c55e;border-radius:8px;color:#4ade80;font-size:14px;margin:14px auto 0;max-width:1080px;padding:10px 14px;text-align:center}
+.orders-title{border-top:1px solid var(--border);margin:20px 0 6px;padding-top:16px}
+.order-row{align-items:center;border-bottom:1px solid var(--border);display:flex;font-size:14px;justify-content:space-between;padding:10px 0}
+.order-id{font-weight:600}
+.order-side{align-items:flex-end;display:flex;flex-direction:column;gap:4px}
+.badge{border-radius:999px;font-size:12px;padding:2px 10px}
+.badge-paid{background:rgba(34,197,94,.15);color:#4ade80}
+.badge-pending{background:rgba(249,115,22,.15);color:var(--accent)}
 `
 	return strings.NewReplacer("__NAME__", spec.Name, "__PRODUCTS__", prod.String()).Replace(app),
 		css(spec.Accent, styles)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/pay"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
@@ -51,6 +52,7 @@ type Server struct {
 	broker   *pipeline.Broker
 	pipeline *pipeline.Pipeline
 	builder  *builder.Builder
+	payStore *pay.Store
 }
 
 func New(cfg Config) *Server {
@@ -68,9 +70,10 @@ func New(cfg Config) *Server {
 	}
 	build := builder.New()
 	return &Server{
-		store:  store,
-		cfg:    cfg,
-		broker: broker,
+		store:    store,
+		cfg:      cfg,
+		broker:   broker,
+		payStore: pay.New(),
 		pipeline: &pipeline.Pipeline{
 			Store:     store,
 			Broker:    broker,
@@ -108,6 +111,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
+	mux.HandleFunc("POST /api/pay/orders", s.handlePayCreate)
+	mux.HandleFunc("GET /api/pay/orders", s.handlePayList)
+	mux.HandleFunc("POST /api/pay/orders/{id}/pay", s.handlePayPay)
+	mux.HandleFunc("GET /pay/checkout/{id}", s.handlePayCheckout)
 	mux.HandleFunc("GET /app/{id}/{path...}", s.handleApp)
 	var handler http.Handler = mux
 	if s.cfg.Auth != nil {

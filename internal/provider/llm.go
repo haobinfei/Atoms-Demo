@@ -19,7 +19,8 @@ const systemPrompt = `你是 Atoms Demo 的应用生成引擎。根据用户的�
 3. 样式用一个 src/styles.css，通过 CSS 变量 --accent 控制主题色，设计要精致现代、响应式。
 4. 应用必须是真实可交互的：使用 useState/useEffect，数据存 localStorage，不许是纯静态占位页。
 5. 界面文案使用中文（除非用户明确要求其他语言）。
-6. 文件数量 4-8 个，代码必须完整，不得截断。`
+6. 文件数量 4-8 个，代码必须完整，不得截断。
+7. 电商类应用（商品、购物车、下单）必须通过平台注入的 SDK 完成支付闭环：import { createOrder, listOrders } from './atomspay'；结算时调用 createOrder(商品数组) 并跳转到返回的 checkoutUrl，订单列表用 listOrders() 拉取，并用 consumePaidCallback() 处理支付成功回调。禁止自实现任何支付/卡号输入界面。`
 
 // DeepSeekProvider is the primary 生成引擎 (cloud, fast).
 type DeepSeekProvider struct {
