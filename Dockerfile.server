@@ -6,11 +6,15 @@ RUN go mod download
 COPY . .
 # esbuild ships platform binaries via Go modules, so a pure-static build
 # (CGO off) still bundles and runs the compiler inside the image.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server && \
+    mkdir -p /workspace && chown 65532:65532 /workspace
 
 # ---- runtime: minimal static base, CA certs included, non-root user ----
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/server /server
+# The volume mountpoint must already belong to the non-root user, or the
+# server cannot create session workspaces under /workspace.
+COPY --from=build --chown=65532:65532 /workspace /workspace
 USER nonroot
 EXPOSE 4173
 VOLUME ["/workspace"]

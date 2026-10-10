@@ -6,7 +6,10 @@ services:
       context: .
       dockerfile: Dockerfile.server
     image: atoms-demo-server:latest
-    env_file: .env
+    # 可选：.env 存在则加载，不存在也能一键起（server 全部有默认值）
+    env_file:
+      - path: .env
+        required: false
     environment:
       PORT: 4173
       WORKSPACE_DIR: /workspace
@@ -21,6 +24,11 @@ services:
     image: atoms-demo-web:latest
     ports:
       - "${WEB_PORT:-8080}:80"
+    # server 无内建 healthcheck（distroless 无 shell），depends_on 仅
+    # 保证启动顺序：web 先就绪时 /api 会短暂 502，数秒后自愈。
+    # 另：nginx 在启动时静态解析 service 名 server——server 容器
+    # 重建换 IP 后需重启 web 才会重新解析（K8s 集群内 ClusterIP
+    # 恒定，无此问题）。
     depends_on:
       - server
     restart: unless-stopped
