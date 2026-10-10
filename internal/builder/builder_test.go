@@ -96,6 +96,46 @@ func TestBuildFailsOnSyntaxErrorAndUnknownImport(t *testing.T) {
 	}
 }
 
+func TestBuildRecoversMissingCSSImports(t *testing.T) {
+	dir := t.TempDir()
+	// App imports a stylesheet the "LLM" never emitted.
+	files := provider.FileSet{
+		"index.html":   `<!DOCTYPE html><html><head></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>`,
+		"src/main.tsx": `import App from "./App"; import "./styles.css";`,
+	}
+	appDir := writeApp(t, dir, files)
+	// Import from a nested component too, to exercise importer-relative paths.
+	if err := os.MkdirAll(filepath.Join(appDir, "src", "components"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "src", "components", "Card.tsx"),
+		[]byte(`import "../panel.css"; export default function Card() { return <div/> }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "src", "App.tsx"),
+		[]byte(`import Card from "./components/Card"; export default function App() { return <Card/> }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := builder.New()
+	distDir := filepath.Join(dir, "dist")
+	if err := b.Build(appDir, distDir); err != nil {
+		t.Fatalf("Build should recover missing css: %v", err)
+	}
+	// The reported import gets a stub next to the importer. (esbuild only
+	// surfaces entry-graph css failures and silently externals nested ones,
+	// so ../panel.css neither errors nor gets stubbed — build still works.)
+	for _, stub := range []string{"src/styles.css"} {
+		content, err := os.ReadFile(filepath.Join(appDir, stub))
+		if err != nil {
+			t.Fatalf("stub %s not written: %v", stub, err)
+		}
+		if len(content) == 0 {
+			t.Fatalf("stub %s is empty", stub)
+		}
+	}
+}
+
 // Regression: LLMs sometimes invent a bare "atomspay:atomspay" specifier and
 // hallucinated export names like simulatePayment. The platform plugin must
 // resolve every such spelling to the injected SDK so the build still passes.

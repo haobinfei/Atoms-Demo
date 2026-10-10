@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/evanw/esbuild/pkg/api"
@@ -43,31 +44,82 @@ func (b *Builder) Build(appDir, distDir string) error {
 	if err := os.MkdirAll(distDir, 0o755); err != nil {
 		return err
 	}
-	result := api.Build(api.BuildOptions{
-		EntryPoints:      []string{filepath.Join(appDir, "src", "main.tsx")},
-		Outdir:           distDir,
-		Bundle:           true,
-		Write:            true,
-		Format:           api.FormatESModule,
-		JSX:              api.JSXAutomatic,
-		MinifySyntax:     true,
-		MinifyWhitespace: true,
-		LogLevel:         api.LogLevelSilent,
-		Plugins:          []api.Plugin{platformPlugin()},
-		AbsWorkingDir:    appDir,
-		OutExtension:     map[string]string{".js": ".js"},
-		EntryNames:       "[name]",
-		ChunkNames:       "[name]",
-	})
-	if len(result.Errors) > 0 {
-		msgs := make([]string, 0, len(result.Errors))
-		for _, m := range result.Errors {
-			msgs = append(msgs, m.Text)
+	options := func() api.BuildOptions {
+		return api.BuildOptions{
+			EntryPoints:      []string{filepath.Join(appDir, "src", "main.tsx")},
+			Outdir:           distDir,
+			Bundle:           true,
+			Write:            true,
+			Format:           api.FormatESModule,
+			JSX:              api.JSXAutomatic,
+			MinifySyntax:     true,
+			MinifyWhitespace: true,
+			LogLevel:         api.LogLevelSilent,
+			Plugins:          []api.Plugin{platformPlugin()},
+			AbsWorkingDir:    appDir,
+			OutExtension:     map[string]string{".js": ".js"},
+			EntryNames:       "[name]",
+			ChunkNames:       "[name]",
 		}
-		return fmt.Errorf("build failed: %s", strings.Join(msgs, "; "))
+	}
+	result := api.Build(options())
+	// LLMs often import stylesheets they forgot to emit. esbuild surfaces
+	// only part of the unresolved-import graph per pass, so stub every
+	// reported .css and rebuild, a few rounds, until the build is clean or
+	// something real is missing (a non-CSS import cannot be stubbed away).
+	for round := 0; len(result.Errors) > 0 && round < 4; round++ {
+		stubs, ok := missingCSS(result.Errors, appDir)
+		if !ok {
+			break
+		}
+		for _, stub := range stubs {
+			if err := os.WriteFile(stub, []byte("/* recovered: LLM 未生成此文件，构建器补空 */\n"), 0o644); err != nil {
+				return fmt.Errorf("build failed: %s", joinErrors(result.Errors))
+			}
+		}
+		result = api.Build(options())
+	}
+	if len(result.Errors) > 0 {
+		return fmt.Errorf("build failed: %s", joinErrors(result.Errors))
 	}
 
 	return b.rewriteIndex(appDir, distDir)
+}
+
+func joinErrors(errs []api.Message) string {
+	msgs := make([]string, 0, len(errs))
+	for _, m := range errs {
+		msgs = append(msgs, m.Text)
+	}
+	return strings.Join(msgs, "; ")
+}
+
+var unresolvedRE = regexp.MustCompile(`Could not resolve "([^"]+)"`)
+
+// missingCSS inspects esbuild resolution errors: if EVERY unresolved
+// import is a .css path, it returns the stub paths to create (next to
+// the importing file, resolved against appDir — esbuild reports importer
+// paths relative to AbsWorkingDir) and true. Any non-CSS unresolved
+// import means real code is missing — no stub can save that build.
+func missingCSS(errs []api.Message, appDir string) ([]string, bool) {
+	stubs := make([]string, 0, len(errs))
+	seen := map[string]bool{}
+	for _, m := range errs {
+		match := unresolvedRE.FindStringSubmatch(m.Text)
+		if match == nil || !strings.HasSuffix(match[1], ".css") {
+			return nil, false
+		}
+		dir := "."
+		if m.Location != nil && m.Location.File != "" {
+			dir = filepath.Dir(m.Location.File)
+		}
+		p := filepath.Join(appDir, dir, match[1])
+		if !seen[p] {
+			seen[p] = true
+			stubs = append(stubs, p)
+		}
+	}
+	return stubs, len(stubs) > 0
 }
 
 // rewriteIndex points the app's index.html at the emitted bundle.
