@@ -61,21 +61,24 @@ func (p *PGStore) Create(owner, prompt string) (*Session, error) {
 		return nil, err
 	}
 	now := time.Now()
+	until := now.Add(defaultClaimTTL)
 	sess := &Session{
-		ID:        id,
-		Owner:     owner,
-		Name:      prompt,
-		Prompt:    prompt,
-		Status:    "building",
-		CreatedAt: now,
-		UpdatedAt: now,
-		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
-		Events:    []Event{},
-		Publishes: []Publish{},
+		ID:         id,
+		Owner:      owner,
+		Name:       prompt,
+		Prompt:     prompt,
+		Status:     "building",
+		LeaseOwner: LeasePending,
+		LeaseUntil: until,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Messages:   []Message{{Role: "user", Content: prompt, At: now}},
+		Events:     []Event{},
+		Publishes:  []Publish{},
 	}
 	_, err = p.pool.Exec(context.Background(),
-		`INSERT INTO sessions (id, owner, name, prompt, status, created_at, updated_at)
-		 VALUES ($1, $2, $3, $3, 'building', $4, $4)`, id, owner, prompt, now)
+		`INSERT INTO sessions (id, owner, name, prompt, status, lease_owner, lease_until, created_at, updated_at)
+		 VALUES ($1, $2, $3, $3, 'building', $5, $6, $4, $4)`, id, owner, prompt, now, LeasePending, until)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
@@ -104,7 +107,7 @@ func (p *PGStore) IndexOwner(id string) (string, error) {
 	return owner, nil
 }
 
-const sessionSelect = `SELECT id, owner, name, prompt, category, pinned, status,
+const sessionSelect = `SELECT id, owner, name, prompt, category, pinned, status, kind,
 	publishes, contest, created_at, updated_at FROM sessions WHERE owner = $1 AND id = $2`
 
 func (p *PGStore) Load(owner, id string) (*Session, error) {
@@ -122,7 +125,7 @@ func (p *PGStore) scanSession(row pgx.Row) (*Session, error) {
 	var sess Session
 	var publishes, contest []byte
 	err := row.Scan(&sess.ID, &sess.Owner, &sess.Name, &sess.Prompt, &sess.Category,
-		&sess.Pinned, &sess.Status, &publishes, &contest, &sess.CreatedAt, &sess.UpdatedAt)
+		&sess.Pinned, &sess.Status, &sess.Kind, &publishes, &contest, &sess.CreatedAt, &sess.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +188,41 @@ func (p *PGStore) loadStream(sess *Session) error {
 		sess.Messages = append(sess.Messages, msg)
 	}
 	return mrows.Err()
+}
+
+// EventsAfter replays persisted events with Seq > after for one session.
+// Ownership is verified against the sessions row so a guessed id cannot
+// read another user's timeline; a miss returns pgx.ErrNoRows like Load.
+func (p *PGStore) EventsAfter(owner, id string, after int) ([]Event, error) {
+	var exists bool
+	err := p.pool.QueryRow(context.Background(),
+		`SELECT true FROM sessions WHERE owner = $1 AND id = $2`, owner, id).Scan(&exists)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := p.pool.Query(context.Background(),
+		`SELECT seq, type, agent, payload, at FROM events
+		 WHERE session_id = $1 AND seq > $2 ORDER BY seq`, id, after)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Event{}
+	for rows.Next() {
+		var ev Event
+		var payload []byte
+		if err := rows.Scan(&ev.Seq, &ev.Type, &ev.Agent, &payload, &ev.At); err != nil {
+			return nil, err
+		}
+		if len(payload) > 0 {
+			ev.Payload = map[string]any{}
+			if err := json.Unmarshal(payload, &ev.Payload); err != nil {
+				return nil, fmt.Errorf("decode event payload: %w", err)
+			}
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
 }
 
 // Save persists the scalar aggregate fields plus the JSONB sub-structures
@@ -254,7 +292,7 @@ func (p *PGStore) AppendMessage(owner, id string, msg Message) error {
 	return err
 }
 
-func (p *PGStore) BeginTurn(owner, id string) (prev string, ok bool, err error) {
+func (p *PGStore) BeginTurn(owner, id, kind string) (prev string, ok bool, err error) {
 	ctx := context.Background()
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -269,16 +307,88 @@ func (p *PGStore) BeginTurn(owner, id string) (prev string, ok bool, err error) 
 	if prev == "building" {
 		return "building", false, nil
 	}
+	// Record the Job kind and a pending lease in the same write as the
+	// status flip (see FileStore.BeginTurn).
+	until := time.Now().Add(defaultClaimTTL)
 	if _, err := tx.Exec(ctx,
-		`UPDATE sessions SET status='building', updated_at=now() WHERE id=$1`, id); err != nil {
+		`UPDATE sessions SET status='building', kind=$3, lease_owner=$4, lease_until=$5,
+		 updated_at=now() WHERE owner=$1 AND id=$2`,
+		owner, id, kind, LeasePending, until); err != nil {
 		return "", false, err
 	}
 	return prev, true, tx.Commit(ctx)
 }
 
+// SetJobKind records the in-flight 任务 (Job) kind for crash recovery.
+func (p *PGStore) SetJobKind(owner, id, kind string) error {
+	return p.touch(owner, id, `UPDATE sessions SET kind=$3, updated_at=now() WHERE owner=$1 AND id=$2`, kind)
+}
+
+// ClaimLease takes the execution lease with a single CAS UPDATE, so two
+// replicas racing for the same session cannot both win. A live lease held by
+// another Worker blocks the claim; a pending lease (BeginTurn / sweeper) is
+// takeover-able by a Worker, and an expired lease by anyone.
+func (p *PGStore) ClaimLease(owner, id, holder string, ttl time.Duration) (bool, error) {
+	until := time.Now().Add(ttl)
+	tag, err := p.pool.Exec(context.Background(),
+		`UPDATE sessions SET lease_owner=$3, lease_until=$4, updated_at=now()
+		  WHERE owner=$1 AND id=$2 AND status='building'
+		    AND (lease_owner IS NULL OR lease_until IS NULL OR lease_until <= now()
+		         OR ($3 <> $5 AND lease_owner = $5))`,
+		owner, id, holder, until, LeasePending)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ReleaseLease clears the lease when holder still owns it.
+func (p *PGStore) ReleaseLease(owner, id, holder string) error {
+	_, err := p.pool.Exec(context.Background(),
+		`UPDATE sessions SET lease_owner=NULL, lease_until=NULL WHERE owner=$1 AND id=$2 AND lease_owner=$3`,
+		owner, id, holder)
+	return err
+}
+
+// ListBuilding returns every building session whose lease is absent or
+// expired, with its in-flight Job kind (inferred from a running contest when
+// the recorded kind is empty).
+func (p *PGStore) ListBuilding() ([]BuildingRef, error) {
+	rows, err := p.pool.Query(context.Background(),
+		`SELECT owner, id,
+		        COALESCE(NULLIF(kind, ''),
+		          CASE WHEN contest IS NOT NULL
+		                 AND COALESCE((contest->>'done')::boolean, false) = false
+		               THEN 'contest' ELSE 'turn' END)
+		   FROM sessions
+		  WHERE status='building' AND (lease_owner IS NULL OR lease_until IS NULL OR lease_until <= now())`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BuildingRef{}
+	for rows.Next() {
+		var ref BuildingRef
+		if err := rows.Scan(&ref.Owner, &ref.ID, &ref.Kind); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (p *PGStore) SetStatus(owner, id, status string) error {
 	_, err := p.pool.Exec(context.Background(),
-		`UPDATE sessions SET status=$3, updated_at=now() WHERE owner=$1 AND id=$2`, owner, id, status)
+		`UPDATE sessions
+		    SET status=$3,
+		        kind=CASE WHEN $3='building' THEN kind ELSE '' END,
+		        lease_owner=CASE WHEN $3='building' THEN lease_owner ELSE NULL END,
+		        lease_until=CASE WHEN $3='building' THEN lease_until ELSE NULL END,
+		        updated_at=now()
+		  WHERE owner=$1 AND id=$2`, owner, id, status)
 	return err
 }
 
@@ -430,7 +540,7 @@ func (p *PGStore) ClearContestWinner(owner, id string) error {
 
 func (p *PGStore) List(owner string) ([]Session, error) {
 	rows, err := p.pool.Query(context.Background(),
-		`SELECT id, owner, name, prompt, category, pinned, status,
+		`SELECT id, owner, name, prompt, category, pinned, status, kind,
 			publishes, contest, created_at, updated_at
 		 FROM sessions WHERE owner = $1
 		 ORDER BY pinned DESC, updated_at DESC`, owner)

@@ -11,66 +11,30 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
 
-// Broker fans session events out to connected SSE clients.
-// All three methods are safe for concurrent use: Publish runs on pipeline
-// goroutines, Subscribe/Unsubscribe on SSE handler goroutines.
-type Broker struct {
-	mu          sync.RWMutex
-	subscribers map[string]map[chan session.Event]struct{}
-}
-
-func NewBroker() *Broker {
-	return &Broker{subscribers: map[string]map[chan session.Event]struct{}{}}
-}
-
-func (b *Broker) Subscribe(id string) chan session.Event {
-	ch := make(chan session.Event, 16)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.subscribers[id] == nil {
-		b.subscribers[id] = map[chan session.Event]struct{}{}
-	}
-	b.subscribers[id][ch] = struct{}{}
-	return ch
-}
-
-func (b *Broker) Unsubscribe(id string, ch chan session.Event) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.subscribers[id], ch)
-	if len(b.subscribers[id]) == 0 {
-		delete(b.subscribers, id)
-	}
-	close(ch)
-}
-
-func (b *Broker) Publish(id string, ev session.Event) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for ch := range b.subscribers[id] {
-		select {
-		case ch <- ev:
-		default: // slow client: drop, it can resume via ?after=
-		}
-	}
-}
-
 // Pipeline runs one turn for a session.
 type Pipeline struct {
-	Store  session.Store
-	Broker *Broker
-	Prov   provider.Provider
+	Store session.Store
+	// Bus fans appended events out to SSE clients. MemoryBus keeps
+	// single-replica behavior; production wires a FanoutBus over Redis
+	// Streams. A nil Bus only degrades live delivery — every event is
+	// already persisted, so clients still catch up via ?after= replay.
+	Bus  eventstream.Bus
+	Prov provider.Provider
 	// Builder compiles the written files into a previewable dist; nil skips
 	// building (kept optional so provider-only tests stay light).
 	Builder *builder.Builder
+	// Artifacts stores each successful build as an immutable snapshot and
+	// activates it for /app. nil keeps the legacy local dist behavior.
+	Artifacts *artifact.Store
 	// StepDelay keeps the timeline human-readable in demos; tests may shrink it.
 	StepDelay time.Duration
 }
@@ -81,7 +45,14 @@ func (p *Pipeline) emit(owner, id string, ev session.Event) {
 		slog.Error("append event", "session", id, "type", ev.Type, "err", err)
 		return
 	}
-	p.Broker.Publish(id, appended)
+	if p.Bus == nil {
+		return
+	}
+	// Postgres already holds the event; Redis fan-out is a hot path, so a
+	// publish failure must never fail or roll back the turn (ADR-0007).
+	if err := p.Bus.Publish(context.Background(), id, appended); err != nil {
+		slog.Warn("publish event", "session", id, "seq", appended.Seq, "err", err)
+	}
 }
 
 // EmitUserMessage puts the user's utterance onto the 事件流 so the
@@ -118,6 +89,27 @@ func (p *Pipeline) EmitScore(owner, id, provider string, scores session.Scores, 
 		"functionality": scores.Functionality,
 		"codeQuality":   scores.CodeQuality,
 		"comment":       comment,
+	}})
+}
+
+// EmitPublishDone announces a finished 发布 (Publish): the rebuilt version is
+// now live at url. Emitted by the publish Worker, not the HTTP handler.
+func (p *Pipeline) EmitPublishDone(owner, id string, version int, url string) {
+	p.emit(owner, id, session.Event{Type: "publish", Payload: map[string]any{
+		"version": version,
+		"url":     url,
+		"detail":  fmt.Sprintf("已发布 v%d", version),
+	}})
+}
+
+// EmitRecovered announces that a crashed 任务 (Job) was picked up by the
+// crash-recovery sweeper and is being re-run from scratch. It is emitted by
+// the Worker, after the execution lease is claimed, so a redelivered or
+// duplicated recovery Job cannot emit it twice.
+func (p *Pipeline) EmitRecovered(owner, id, kind string) {
+	p.emit(owner, id, session.Event{Type: "recovered", Agent: "system", Payload: map[string]any{
+		"kind":   kind,
+		"detail": "实例重启，自动恢复重跑",
 	}})
 }
 
@@ -218,8 +210,19 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 				// Drop any stale dist so /app never serves an outdated build
 				// while the session is failed.
 				_ = os.RemoveAll(distDir)
+				p.dropArtifacts(id)
 				status = "failed"
 				fail(err)
+			} else if p.Artifacts != nil {
+				if _, err := p.Artifacts.PutTree(ctx, artifact.SessionPrefix(id), distDir); err != nil {
+					// A multi-replica /app reads from the shared store, so a
+					// failed upload must fail the turn rather than expose a
+					// version only one replica can see.
+					_ = os.RemoveAll(distDir)
+					p.dropArtifacts(id)
+					status = "failed"
+					fail(fmt.Errorf("store build: %w", err))
+				}
 			}
 		}
 	}
@@ -330,6 +333,20 @@ func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet) error {
 		}
 	}
 	return nil
+}
+
+// dropArtifacts removes the active build after a failed turn, matching the
+// legacy behavior of deleting a stale local dist. Cleanup is best effort and
+// uses a fresh context because the Job context may already be canceled.
+func (p *Pipeline) dropArtifacts(id string) {
+	if p.Artifacts == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.Artifacts.ClearCurrent(ctx, artifact.SessionPrefix(id)); err != nil {
+		slog.Warn("drop failed build artifacts", "session", id, "err", err)
+	}
 }
 
 func (p *Pipeline) setStatus(owner, id, status string) {

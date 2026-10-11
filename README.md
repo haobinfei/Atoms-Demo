@@ -41,6 +41,10 @@ cd web && npm install && npm run dev
 | `PORT` | `4173` | 后端监听端口 |
 | `WORKSPACE_DIR` | `workspace` | 会话工作区根目录 |
 | `AUTH_MODE` | `dev` | `dev` 免登录（`DEV_USER`），`oidc` 走 AuthSphere |
+| `DATABASE_DSN` | 空 | Postgres DSN（`atoms-middleware` Secret）；留空用文件存储 |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD` | 空 | Redis Streams 同时承担实时扇出与任务队列（ADR-0007）。`REDIS_HOST` 留空退回单进程 MemoryBus + 有界 MemoryQueue；配置 Redis 后队列不可用（满/断连）时入队返回 503，**不静默回退内存队列**、不丢任务；事件扇出失败仍降级为 Postgres 重放 |
+| `QUEUE_WORKERS` | `3` | Worker 池大小，也是 LLM 并发闸门；内存队列容量为其 ×4 |
+| `COS_BUCKET` / `COS_ENDPOINT` / `COS_SECRET_ID` / `COS_SECRET_KEY` / `COS_SESSION_TOKEN` | 空 | 构建产物 Artifact Store；全部留空时 `/app` 读本地 `dist`。配置后构建产物写入腾讯 COS，多副本通过不可变 build + `current.json` 指针共享预览/发布。凭据由 `atoms-demo-env` Secret 注入；当前临时 session token 上线前换 CAM 子账号永久密钥 |
 | `DEEPSEEK_API_KEY` | 空 | 主生成引擎（留空则降级到本地模型/模板） |
 | `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 官方默认值 | DeepSeek 兼容端点覆写 |
 | `LOCAL_LLM_BASE_URL` | `http://192.168.1.101:8090/v1` | 本地 gemma（llama.cpp OpenAI 兼容） |
@@ -51,6 +55,8 @@ cd web && npm install && npm run dev
 
 生成引擎是三级兜底链：DeepSeek → 本地 gemma → 内置模板（意图识别 + 七类应用
 骨架），任何一级不可用自动降级，绝不卡死。
+
+构建产物存储有两种模式：未配置 COS 时沿用 `workspace/<owner>/<id>/dist`（本地开发与单副本）；配置 COS 后每次成功构建写入不可变对象目录，`current.json` 原子切换活动版本。发布先上传并激活新版本，再写 Postgres 发布记录；记录失败会恢复旧指针。API 多副本的 `/app` 因此不依赖各 Pod 本地 `dist`。
 
 ## 测试
 
@@ -82,3 +88,5 @@ E2E 自包含一条命令：Playwright 自动拉起真实 Go 服务（生成引�
 Docker 与 GitOps（Argo CD + Helm，push 后自动拉起）见平级仓库
 `atoms-demo-gitops` 与其 README；本仓库提供 `docker-compose.yml` 一键起全栈、
 Dockerfile（server / web）与 `.env.example`。
+
+生产多副本前需满足两点：`atoms-demo-env` Secret 包含全部 `COS_*` 键；app 源码工作区必须是所有副本可共同访问的存储（共享 RWX PV，或后续把源码也迁入对象存储）。COS 迁移只解除构建产物对 Pod 本地 `dist` 的依赖。

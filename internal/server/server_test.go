@@ -30,7 +30,10 @@ func newTestServerDir(t *testing.T, prov provider.Provider) (*httptest.Server, s
 	dir := t.TempDir()
 	srv := server.New(server.Config{WorkspaceDir: dir, DevAuth: true, Prov: prov})
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
 	return ts, dir
 }
 

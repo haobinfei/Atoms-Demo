@@ -78,7 +78,10 @@ func newAuthTestServer(t *testing.T) *authEnv {
 	}
 	srv := server.New(server.Config{WorkspaceDir: t.TempDir(), Auth: mw, Prov: provider.NewTemplate()})
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
 	return &authEnv{ts: ts, issuer: issuer, priv: priv}
 }
 
@@ -354,16 +357,26 @@ func TestUserIsolation(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 	pubResp.Body.Close()
-	if pubResp.StatusCode != http.StatusOK {
-		t.Fatalf("publish status = %d, want 200", pubResp.StatusCode)
+	// Publish is asynchronous: the request is accepted (202) and the rebuild
+	// lands on a Worker. Poll the public URL until it serves.
+	if pubResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("publish status = %d, want 202", pubResp.StatusCode)
 	}
-	anon, err := http.Get(e.ts.URL + "/app/" + out.SessionID + "/")
-	if err != nil {
-		t.Fatalf("anonymous published app: %v", err)
-	}
-	anon.Body.Close()
-	if anon.StatusCode != http.StatusOK {
-		t.Fatalf("anonymous published app status = %d, want 200", anon.StatusCode)
+	deadline := time.Now().Add(10 * time.Second)
+	var anon *http.Response
+	for {
+		anon, err = http.Get(e.ts.URL + "/app/" + out.SessionID + "/")
+		if err != nil {
+			t.Fatalf("anonymous published app: %v", err)
+		}
+		anon.Body.Close()
+		if anon.StatusCode == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("anonymous published app status = %d, want 200", anon.StatusCode)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

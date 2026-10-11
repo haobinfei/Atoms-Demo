@@ -6,18 +6,24 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
+	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
 	"github.com/haobinfei/Atoms-Demo/internal/pay"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -41,21 +47,75 @@ type Config struct {
 	// Store overrides session persistence; nil means FileStore under
 	// WorkspaceDir. Production passes a PGStore via DATABASE_DSN.
 	Store session.Store
+	// Artifacts is the shared build-output store. Production passes a COS
+	// store so /app reads the same immutable snapshot from every replica;
+	// nil keeps the legacy local dist directory behavior.
+	Artifacts *artifact.Store
 	// Competitors are the 参赛者 for 竞赛 (Competition) mode; defaults to
 	// the members of the fallback chain (gemma 离线时自动减员).
 	Competitors []provider.Provider
 	// ScoreFunc is Nina's scoring brain; defaults to LLM with a
 	// deterministic heuristic fallback.
 	ScoreFunc ScoreFunc
+	// Bus fans events out to SSE clients. nil means an in-process
+	// MemoryBus; production passes a FanoutBus over Redis Streams
+	// (ADR-0007) so multiple replicas share the live hot path.
+	Bus eventstream.Bus
+	// HeartbeatInterval emits an SSE comment line when no event has been
+	// written, keeping proxies from closing an idle connection. Zero uses
+	// the 15s production default; tests shrink it.
+	HeartbeatInterval time.Duration
+	// PollInterval re-reads Postgres for events missed on the Redis hot
+	// path (Redis down or a dropped stream entry). Zero uses 5s; this is
+	// the graceful-degradation fallback required by #17.
+	PollInterval time.Duration
+	// Queue is the 队列 (Queue) that turn/contest/publish 任务 (Job) enter.
+	// nil means an in-process MemoryQueue sized QueueWorkers×4; production
+	// passes a RedisQueue so Workers span replicas (ADR-0007).
+	Queue jobqueue.Queue
+	// QueueWorkers is the Worker pool size and thus the LLM concurrency
+	// gate. Zero uses the 3-worker production default.
+	QueueWorkers int
+	// LeaseTTL bounds how long a Worker's 认领租约 (execution lease) blocks
+	// another replica before the sweeper treats the holder as crashed and
+	// re-enqueues. Zero uses the 10-minute production default; tests shrink
+	// it. It must comfortably exceed the longest generation.
+	LeaseTTL time.Duration
+	// SweepInterval is how often the crash-recovery sweeper rescans for
+	// building sessions with no live lease. Zero uses the 30s default; tests
+	// shrink it.
+	SweepInterval time.Duration
 }
 
 type Server struct {
-	store    session.Store
-	cfg      Config
-	broker   *pipeline.Broker
-	pipeline *pipeline.Pipeline
-	builder  *builder.Builder
-	payStore *pay.Store
+	store     session.Store
+	cfg       Config
+	artifacts *artifact.Store
+	bus       eventstream.Bus
+	queue     jobqueue.Queue
+	pipeline  *pipeline.Pipeline
+	builder   *builder.Builder
+	payStore  *pay.Store
+
+	// cancel stops the Worker pool and the recovery sweeper; closeOnce makes
+	// Close idempotent.
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	// workers tracks the Worker pool and sweeper goroutines so Close can wait
+	// until no background writer can touch a workspace after it returns.
+	workers sync.WaitGroup
+	// running marks sessions a Worker on this replica is executing right
+	// now, so a duplicate delivery (at-least-once redelivery) never runs two
+	// pipelines on one session at once. Cross-replica exclusion is the
+	// store-level 认领租约 (execution lease) claimed in handleJob.
+	running sync.Map
+	// leaseTTL bounds an execution lease; sweepInterval is the sweeper tick.
+	leaseTTL      time.Duration
+	sweepInterval time.Duration
+	// leaseHolder identifies this replica as the lease owner (host+pid): two
+	// Workers in one process share it, but the in-process running map already
+	// drops their duplicate, and a different replica has a different holder.
+	leaseHolder string
 }
 
 func New(cfg Config) *Server {
@@ -69,26 +129,211 @@ func New(cfg Config) *Server {
 	if store == nil {
 		store = session.NewStore(cfg.WorkspaceDir)
 	}
-	broker := pipeline.NewBroker()
+	artifacts := cfg.Artifacts
+	bus := cfg.Bus
+	if bus == nil {
+		bus = eventstream.NewMemoryBus()
+	}
 	prov := cfg.Prov
 	if prov == nil {
 		prov = provider.ChainFromEnv(context.Background(), cfg.Env)
 	}
+	workers := cfg.QueueWorkers
+	if workers <= 0 {
+		workers = 3
+	}
+	cfg.QueueWorkers = workers
+	queue := cfg.Queue
+	if queue == nil {
+		queue = jobqueue.NewMemoryQueue(workers * 4)
+	}
+	cfg.Queue = queue
+	leaseTTL := cfg.LeaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = 10 * time.Minute
+	}
+	sweepInterval := cfg.SweepInterval
+	if sweepInterval <= 0 {
+		sweepInterval = 30 * time.Second
+	}
+	host, _ := os.Hostname()
 	build := builder.New()
-	return &Server{
+	s := &Server{
 		store:    store,
 		cfg:      cfg,
-		broker:   broker,
+		bus:      bus,
+		queue:    queue,
 		payStore: pay.New(),
 		pipeline: &pipeline.Pipeline{
 			Store:     store,
-			Broker:    broker,
+			Bus:       bus,
 			Prov:      prov,
 			Builder:   build,
+			Artifacts: artifacts,
 			StepDelay: 120 * time.Millisecond,
 		},
-		builder: build,
+		artifacts:     artifacts,
+		builder:       build,
+		leaseTTL:      leaseTTL,
+		sweepInterval: sweepInterval,
+		leaseHolder:   fmt.Sprintf("%s-%d", host, os.Getpid()),
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.startWorkers(ctx, workers)
+	s.startSweeper(ctx)
+	return s
+}
+
+// startWorkers launches the Worker pool: each goroutine is a consumer of the
+// Queue (a Redis consumer-group member, or a reader of the in-process
+// channel). Worker count is the LLM concurrency gate.
+func (s *Server) startWorkers(ctx context.Context, n int) {
+	host, _ := os.Hostname()
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("%s-%d-%d", host, os.Getpid(), i)
+		s.workers.Add(1)
+		go func(workerID string) {
+			defer s.workers.Done()
+			if err := s.queue.Run(ctx, workerID, s.handleJob); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("job worker stopped", "worker", workerID, "err", err)
+			}
+		}(id)
+	}
+}
+
+// handleJob is the Worker-side claim: the correctness backstop behind the HTTP
+// thread's fast BeginTurn 409. It re-reads the session and only runs work whose
+// status is still "building"; a stale duplicate (the turn already finished, or
+// the status was rolled back) is acknowledged with no side effects. A per-
+// session in-process guard drops a concurrent duplicate on this replica, and a
+// store-level 认领租约 (execution lease) drops one across replicas.
+func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
+	sess, err := s.store.Load(job.Owner, job.SessionID)
+	if err != nil {
+		// Session deleted while the Job was queued: nothing to do.
+		return nil
+	}
+	if sess.Status != "building" {
+		return nil
+	}
+	// A stale Job from an earlier turn/contest/publish must not run against a
+	// session that is now building a different kind of work. Legacy sessions
+	// may have no recorded kind; in that case the lease and status still
+	// serialize execution.
+	if sess.Kind != "" && job.Kind != "" && sess.Kind != string(job.Kind) {
+		return nil
+	}
+	if _, running := s.running.LoadOrStore(job.SessionID, struct{}{}); running {
+		return nil
+	}
+	defer s.running.Delete(job.SessionID)
+
+	// Cross-replica claim: at most one executor owns a session at a time. A
+	// lost race (another replica or the sweeper already holds a live lease)
+	// means this delivery is a harmless no-op.
+	ok, err := s.store.ClaimLease(job.Owner, job.SessionID, s.leaseHolder, s.leaseTTL)
+	if err != nil {
+		return err // leave the Job pending; Redis redelivers it
+	}
+	if !ok {
+		return nil
+	}
+	defer func() { _ = s.store.ReleaseLease(job.Owner, job.SessionID, s.leaseHolder) }()
+
+	// Emit the 恢复事件 (recovered event) only after winning the lease, so a
+	// duplicate recovery delivery cannot announce the same recovery twice.
+	if job.Recover {
+		s.pipeline.EmitRecovered(job.Owner, job.SessionID, string(job.Kind))
+	}
+
+	switch job.Kind {
+	case jobqueue.KindTurn:
+		s.pipeline.Run(ctx, job.Owner, job.SessionID)
+	case jobqueue.KindContest:
+		// A whole 竞赛 (contest) is one Job: contestants still fan out in
+		// parallel inside, so a single Worker never serializes them.
+		s.runContest(ctx, job.Owner, job.SessionID, sess.Prompt)
+	case jobqueue.KindPublish:
+		s.runPublish(ctx, job.Owner, job.SessionID)
+	}
+	return nil
+}
+
+// startSweeper runs the crash-recovery scan once at startup, then on every
+// SweepInterval tick: every building session whose lease is absent or expired
+// (a crashed replica's leftover) is re-enqueued, and the Worker that picks it
+// up re-runs the work from scratch (ADR-0007).
+func (s *Server) startSweeper(ctx context.Context) {
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		s.sweepOnce(ctx)
+		ticker := time.NewTicker(s.sweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.sweepOnce(ctx)
+			}
+		}
+	}()
+}
+
+// sweepOnce re-enqueues every recoverable building session. Claiming a
+// pending lease before the enqueue keeps two replicas (or two ticks) from
+// enqueuing the same recovery twice; a failed enqueue releases it so the next
+// tick retries instead of stranding the session until the lease expires.
+func (s *Server) sweepOnce(ctx context.Context) {
+	refs, err := s.store.ListBuilding()
+	if err != nil {
+		slog.Warn("recovery sweep: list building sessions", "err", err)
+		return
+	}
+	for _, ref := range refs {
+		ok, err := s.store.ClaimLease(ref.Owner, ref.ID, session.LeasePending, s.leaseTTL)
+		if err != nil {
+			slog.Warn("recovery sweep: claim lease", "session", ref.ID, "err", err)
+			continue
+		}
+		if !ok {
+			continue // another replica is already recovering it
+		}
+		kind := jobqueue.Kind(ref.Kind)
+		job := jobqueue.Job{Owner: ref.Owner, SessionID: ref.ID, Kind: kind, Recover: true}
+		if err := s.queue.Enqueue(ctx, job); err != nil {
+			slog.Warn("recovery sweep: enqueue", "session", ref.ID, "kind", kind, "err", err)
+			_ = s.store.ReleaseLease(ref.Owner, ref.ID, session.LeasePending)
+			continue
+		}
+		slog.Info("recovery sweep: re-enqueued building session",
+			"session", ref.ID, "kind", kind)
+	}
+}
+
+// Close stops the Worker pool and releases the event bus (and its Redis
+// client, when configured). It is safe to call more than once.
+func (s *Server) Close() error {
+	var err error
+	s.closeOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.queue != nil {
+			if e := s.queue.Close(); e != nil {
+				err = e
+			}
+		}
+		s.workers.Wait()
+		if s.bus != nil {
+			if e := s.bus.Close(); e != nil {
+				err = e
+			}
+		}
+	})
+	return err
 }
 
 func (s *Server) Handler() http.Handler {
@@ -272,6 +517,10 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if s.artifacts != nil {
+		s.handleArtifactApp(w, r, id)
+		return
+	}
 	ws, err := s.workspaceDir(owner, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not found")
@@ -315,15 +564,92 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, full)
 }
 
+// handleArtifactApp serves the same public /app surface from the shared
+// artifact store. The current pointer is resolved per request, so a build
+// activated by one replica is immediately visible on every other replica.
+func (s *Server) handleArtifactApp(w http.ResponseWriter, r *http.Request, id string) {
+	prefix := artifact.SessionPrefix(id)
+	rel := r.PathValue("path")
+	if rest, found := strings.CutPrefix(rel, "contest/"); found {
+		prov, sub, ok := strings.Cut(rest, "/")
+		if !ok || !validProviderSegment(prov) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		prefix = artifact.ContestPrefix(id, prov)
+		rel = sub
+	}
+	rel, ok := cleanArtifactPath(rel)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	obj, buildID, err := s.artifacts.Open(r.Context(), prefix, rel)
+	if err != nil {
+		if errors.Is(err, artifact.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not built yet")
+			return
+		}
+		slog.Error("open app artifact", "session", id, "path", rel, "err", err)
+		writeError(w, http.StatusBadGateway, "artifact store unavailable")
+		return
+	}
+	defer obj.Body.Close()
+	w.Header().Set("Cache-Control", "no-cache")
+	if rel == "index.html" {
+		body, err := io.ReadAll(obj.Body)
+		if err != nil {
+			slog.Error("read app artifact index", "session", id, "err", err)
+			writeError(w, http.StatusBadGateway, "artifact store unavailable")
+			return
+		}
+		s.servePreviewIndexBody(w, body, "b"+buildID+":")
+		return
+	}
+	if obj.ContentType != "" {
+		w.Header().Set("Content-Type", obj.ContentType)
+	}
+	if obj.Size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
+	}
+	if obj.ETag != "" {
+		w.Header().Set("ETag", obj.ETag)
+	}
+	if !obj.ModTime.IsZero() {
+		w.Header().Set("Last-Modified", obj.ModTime.UTC().Format(http.TimeFormat))
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, obj.Body); err != nil {
+		slog.Warn("stream app artifact", "session", id, "path", rel, "err", err)
+	}
+}
+
+func cleanArtifactPath(rel string) (string, bool) {
+	if rel == "" {
+		return "index.html", true
+	}
+	if strings.Contains(rel, "\\") {
+		return "", false
+	}
+	clean := path.Clean(rel)
+	if clean == "." {
+		return "index.html", true
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
+		return "", false
+	}
+	return clean, true
+}
+
 // servePreviewIndex serves a built app's index.html with a per-build
 // storage namespace injected. Generated apps routinely persist state in
 // localStorage with "stored value wins over defaults" logic; without
 // isolation an early (empty or outdated) write shadows the richer
 // defaults of every later build, and the preview looks "stale" no matter
-// how often it rebuilds. Keying the namespace to the build's mtime gives
-// each rebuild a fresh storage view (new defaults show) while edits made
-// inside one build still survive preview reloads.
-func (s *Server) servePreviewIndex(w http.ResponseWriter, r *http.Request, indexPath string) {
+// how often it rebuilds. Local builds key the namespace to mtime; shared
+// artifacts key it to the immutable build id so every replica injects the
+// same namespace.
+func (s *Server) servePreviewIndex(w http.ResponseWriter, _ *http.Request, indexPath string) {
 	body, err := os.ReadFile(indexPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not built yet")
@@ -334,8 +660,12 @@ func (s *Server) servePreviewIndex(w http.ResponseWriter, r *http.Request, index
 		writeError(w, http.StatusNotFound, "not built yet")
 		return
 	}
-	// Digits only — this string lands verbatim in the injected script.
-	ns := fmt.Sprintf("b%d:", info.ModTime().Unix())
+	s.servePreviewIndexBody(w, body, fmt.Sprintf("b%d:", info.ModTime().Unix()))
+}
+
+func (s *Server) servePreviewIndexBody(w http.ResponseWriter, body []byte, ns string) {
+	// Digits plus the fixed b/colon wrapper — this string lands verbatim in
+	// the injected script.
 	injection := []byte(`<script data-atoms-storage-ns>
 (() => {
   const NS = "` + ns + `";
@@ -504,12 +834,18 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			sess = loaded
 		}
 	}
+	kind := jobqueue.KindTurn
 	if req.Competition {
-		go s.runContest(user, sess.ID, sess.Prompt)
-	} else {
-		// The pipeline runs asynchronously and streams events into the
-		// session's event log; see handleEvents.
-		s.runPipeline(user, sess.ID)
+		kind = jobqueue.KindContest
+	}
+	if err := s.enqueueJob(user, sess.ID, kind); err != nil {
+		// The Queue is full or Redis is unreachable: surface 503 and mark the
+		// session failed rather than silently running a bare goroutine or
+		// dropping the turn (ADR-0007).
+		slog.Error("enqueue create job", "session", sess.ID, "kind", kind, "err", err)
+		_ = s.store.SetStatus(user, sess.ID, "failed")
+		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
 }
@@ -523,10 +859,25 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sess)
 }
 
-// runPipeline executes the agent pipeline for the session asynchronously;
-// events land in the session's event log and are fanned out to SSE clients.
-func (s *Server) runPipeline(user, id string) {
-	go s.pipeline.Run(context.Background(), user, id)
+// enqueueJob puts a 任务 (Job) on the Queue. The work then runs on a Worker,
+// not a bare goroutine (ADR-0007); events land in the session's event log and
+// are fanned out to SSE clients. A full or unavailable Queue is a hard error
+// the HTTP layer surfaces as 503 — the Job is never silently dropped.
+func (s *Server) enqueueJob(user, id string, kind jobqueue.Kind) error {
+	// Record the kind before the Job can run, so crash recovery re-enqueues
+	// the right work. The create path reaches here straight from Create
+	// (which does not know the kind); chat/publish already set it atomically
+	// in BeginTurn, so this is an idempotent re-stamp.
+	if err := s.store.SetJobKind(user, id, string(kind)); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return s.queue.Enqueue(ctx, jobqueue.Job{
+		Owner:     user,
+		SessionID: id,
+		Kind:      kind,
+	})
 }
 
 // handleListSessions returns the current user's sessions for the dashboard:
@@ -597,19 +948,38 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 
 // handleDuplicate deep-copies a session into a fresh one.
 func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.store.Duplicate(s.requestUser(r), r.PathValue("id"))
+	user := s.requestUser(r)
+	id := r.PathValue("id")
+	sess, err := s.store.Duplicate(user, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if s.artifacts != nil {
+		_, err := s.artifacts.CopyTree(r.Context(), artifact.SessionPrefix(id), artifact.SessionPrefix(sess.ID))
+		if err != nil && !errors.Is(err, artifact.ErrNotFound) {
+			_ = s.store.Delete(user, sess.ID)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
 }
 
 // handleDelete removes a session and its public-URL index entry.
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Delete(s.requestUser(r), r.PathValue("id")); err != nil {
+	user := s.requestUser(r)
+	id := r.PathValue("id")
+	if err := s.store.Delete(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if s.artifacts != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.artifacts.DeletePrefix(ctx, artifact.SessionPrefix(id)); err != nil {
+			slog.Warn("delete session artifacts", "session", id, "err", err)
+		}
+		cancel()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -634,7 +1004,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// BeginTurn serializes concurrent chat requests atomically; without it
 	// two racing POSTs could both pass a plain status check and interleave
 	// two pipelines on one session.
-	prev, ok, err := s.store.BeginTurn(user, id)
+	prev, ok, err := s.store.BeginTurn(user, id, string(jobqueue.KindTurn))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -652,12 +1022,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pipeline.EmitUserMessage(user, id, msg)
-	s.runPipeline(user, id)
+	if err := s.enqueueJob(user, id, jobqueue.KindTurn); err != nil {
+		// Queue full / Redis down: roll the session back so the next request is
+		// not rejected forever, and surface 503. The user message stays on the
+		// timeline (it was persisted before the enqueue); a retry appends the
+		// follow-up again, the documented at-least-once tradeoff.
+		slog.Error("enqueue chat turn", "session", id, "err", err)
+		_ = s.store.SetStatus(user, id, prev)
+		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
 }
 
-// handlePublish rebuilds the dist and records one 发布 (Publish): the
-// public, credential-free URL /app/{id}/ now serves this version.
+// handlePublish claims the session and puts a 发布 (Publish) Job on the Queue,
+// returning immediately. The rebuild runs on a Worker (runPublish); the client
+// polls the publish history for the new version. The synchronous pre-checks
+// keep 404/409/400 behavior identical to the old inline handler.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	user := s.requestUser(r)
@@ -666,9 +1047,9 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Claim the session atomically: a chat turn starting mid-publish would
-	// otherwise race this rebuild for the same distDir. The session shows
+	// otherwise race the rebuild for the same distDir. The session shows
 	// "building" for the duration, which also 409s chat requests.
-	prev, ok, err := s.store.BeginTurn(user, id)
+	prev, ok, err := s.store.BeginTurn(user, id, string(jobqueue.KindPublish))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -678,6 +1059,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	restore := func() { _ = s.store.SetStatus(user, id, prev) }
+	// Pre-validate synchronously so "nothing to publish" stays a 400 rather
+	// than an async error event the caller cannot correlate.
 	appDir, err := s.appDir(user, id)
 	if err != nil {
 		restore()
@@ -689,10 +1072,44 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no app to publish yet")
 		return
 	}
+	if err := s.enqueueJob(user, id, jobqueue.KindPublish); err != nil {
+		// Queue full / Redis down: roll back and surface 503, never a silent
+		// drop of the publish.
+		slog.Error("enqueue publish", "session", id, "err", err)
+		restore()
+		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "publishing"})
+}
+
+// runPublish is the Worker-side 发布 (Publish) execution: rebuild dist into a
+// side directory and swap, so a failed rebuild never takes down the version
+// /app is currently serving. Any failure keeps the old dist, restores the
+// session to "ready", and lands an error on the timeline; success records a
+// version and emits a publish event.
+func (s *Server) runPublish(ctx context.Context, user, id string) {
+	if s.artifacts != nil {
+		s.runPublishArtifacts(ctx, user, id)
+		return
+	}
+	s.runPublishLocal(user, id)
+}
+
+func (s *Server) runPublishLocal(user, id string) {
+	fail := func(msg string) {
+		slog.Error("publish failed", "session", id, "detail", msg)
+		_ = s.store.SetStatus(user, id, "ready")
+		s.pipeline.EmitError(user, id, "发布失败："+msg)
+	}
+	appDir, err := s.appDir(user, id)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
 	ws, err := s.workspaceDir(user, id)
 	if err != nil {
-		restore()
-		writeError(w, http.StatusBadRequest, err.Error())
+		fail(err.Error())
 		return
 	}
 	distDir := filepath.Join(ws, "dist")
@@ -705,16 +1122,14 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	_ = os.RemoveAll(bakDir)
 	if err := s.builder.Build(appDir, tmpDir); err != nil {
 		_ = os.RemoveAll(tmpDir)
-		restore()
-		writeError(w, http.StatusInternalServerError, "rebuild failed: "+err.Error())
+		fail("rebuild failed: " + err.Error())
 		return
 	}
 	swapped := false
 	if _, err := os.Stat(distDir); err == nil {
 		if err := os.Rename(distDir, bakDir); err != nil {
 			_ = os.RemoveAll(tmpDir)
-			restore()
-			writeError(w, http.StatusInternalServerError, "stash previous dist: "+err.Error())
+			fail("stash previous dist: " + err.Error())
 			return
 		}
 		swapped = true
@@ -724,8 +1139,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 			_ = os.Rename(bakDir, distDir)
 		}
 		_ = os.RemoveAll(tmpDir)
-		restore()
-		writeError(w, http.StatusInternalServerError, "activate new dist: "+err.Error())
+		fail("activate new dist: " + err.Error())
 		return
 	}
 	pub, err := s.store.RecordPublish(user, id, "/app/"+id+"/")
@@ -738,13 +1152,81 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 				slog.Error("restore previous dist after record failure", "session", id, "err", err)
 			}
 		}
-		restore()
-		writeError(w, http.StatusInternalServerError, err.Error())
+		fail(err.Error())
 		return
 	}
 	_ = os.RemoveAll(bakDir)
 	_ = s.store.SetStatus(user, id, "ready")
-	writeJSON(w, http.StatusOK, pub)
+	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
+}
+
+// runPublishArtifacts rebuilds into a staged immutable object directory,
+// activates it, and only then records the publish. A record failure restores
+// the previous pointer, preserving the local swap's rollback contract while
+// keeping every replica on the same version.
+func (s *Server) runPublishArtifacts(ctx context.Context, user, id string) {
+	fail := func(msg string) {
+		slog.Error("publish failed", "session", id, "detail", msg)
+		_ = s.store.SetStatus(user, id, "ready")
+		s.pipeline.EmitError(user, id, "发布失败："+msg)
+	}
+	appDir, err := s.appDir(user, id)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	ws, err := s.workspaceDir(user, id)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	tmpDir := filepath.Join(ws, "dist.new")
+	_ = os.RemoveAll(tmpDir)
+	if err := s.builder.Build(appDir, tmpDir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("rebuild failed: " + err.Error())
+		return
+	}
+	prefix := artifact.SessionPrefix(id)
+	previousID, hadPrevious, err := s.artifacts.Current(ctx, prefix)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("read current build: " + err.Error())
+		return
+	}
+	newID, err := s.artifacts.StageTree(ctx, prefix, tmpDir)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("stage new build: " + err.Error())
+		return
+	}
+	if err := s.artifacts.Activate(ctx, prefix, newID); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("activate new build: " + err.Error())
+		return
+	}
+	pub, err := s.store.RecordPublish(user, id, "/app/"+id+"/")
+	if err != nil {
+		// The Job context may already be canceled when the record fails. Use
+		// a fresh bounded context so rollback still has a chance to repair
+		// the shared pointer; otherwise every replica could keep serving the
+		// unrecorded build indefinitely.
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if hadPrevious {
+			if restoreErr := s.artifacts.Activate(rollbackCtx, prefix, previousID); restoreErr != nil {
+				slog.Error("restore previous artifact after record failure", "session", id, "err", restoreErr)
+			}
+		} else if deleteErr := s.artifacts.ClearCurrent(rollbackCtx, prefix); deleteErr != nil {
+			slog.Error("drop unrecorded artifact after record failure", "session", id, "err", deleteErr)
+		}
+		_ = os.RemoveAll(tmpDir)
+		fail(err.Error())
+		return
+	}
+	_ = os.RemoveAll(tmpDir)
+	_ = s.store.SetStatus(user, id, "ready")
+	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
 }
 
 // handleGetPublishes returns the full publish history, oldest first.
@@ -769,31 +1251,43 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		after = n
 	}
-	sess, err := s.store.Load(user, id)
-	if err != nil {
+	// Existence (and ownership) check before hijacking the response into a
+	// stream: a missing session must be a 404, not an open SSE connection.
+	if _, err := s.store.Load(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	// Subscribe before replaying: events published between the load and the
-	// subscription would otherwise fall into a gap (neither replayed nor
-	// streamed). Seq dedup below collapses any overlap.
-	ch := s.broker.Subscribe(id)
-	defer s.broker.Unsubscribe(id, ch)
+	ctx := r.Context()
+	// Subscribe before replaying: events published between the replay read
+	// and the subscription would otherwise fall into a gap. Seq dedup below
+	// collapses the subscribe/replay overlap.
+	sub, err := s.bus.Subscribe(ctx, id, after)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "event stream unavailable")
+		return
+	}
+	defer sub.Close()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Send the headers right away: an event-free stream (client already
+	// caught up) must not leave the response unsent until the first
+	// heartbeat. This is what turns the handler into a real SSE stream.
+	flusher.Flush()
 
 	maxSeq := after
 	writeEvent := func(ev session.Event) {
+		// Dedup + order guard: replayed and live events may overlap, and a
+		// stale Redis entry must never move the client's cursor backwards.
 		if ev.Seq <= maxSeq {
-			return // already replayed (subscribe-before-load overlap)
+			return
 		}
 		maxSeq = ev.Seq
 		data, _ := json.Marshal(ev)
@@ -801,18 +1295,55 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Replay persisted history the client has not seen yet.
-	for _, ev := range sess.Events {
-		writeEvent(ev)
+	// Postgres is the source of truth: replay whatever the client missed
+	// (initial history, a dropped Redis entry, or a whole Redis outage).
+	replay := func() {
+		events, err := s.store.EventsAfter(user, id, maxSeq)
+		if err != nil {
+			slog.Warn("replay events", "session", id, "after", maxSeq, "err", err)
+			return
+		}
+		for _, ev := range events {
+			writeEvent(ev)
+		}
 	}
+	replay()
 
-	// Stream live events until the client goes away.
+	heartbeatEvery := s.cfg.HeartbeatInterval
+	if heartbeatEvery <= 0 {
+		heartbeatEvery = 15 * time.Second
+	}
+	pollEvery := s.cfg.PollInterval
+	if pollEvery <= 0 {
+		pollEvery = 5 * time.Second
+	}
+	heartbeat := time.NewTicker(heartbeatEvery)
+	defer heartbeat.Stop()
+	poll := time.NewTicker(pollEvery)
+	defer poll.Stop()
+
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
-		case ev := <-ch:
+		case ev, ok := <-sub.Events():
+			if !ok {
+				return
+			}
+			// A seq jump means the live path dropped events (slow consumer
+			// or a trimmed Redis Stream): top the hole up from Postgres
+			// before writing the live event that exposed it.
+			if ev.Seq > maxSeq+1 {
+				replay()
+			}
 			writeEvent(ev)
+		case <-poll.C:
+			// Fallback so a client keeps making progress even when the
+			// Redis hot path is down and no live event will ever arrive.
+			replay()
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
 		}
 	}
 }

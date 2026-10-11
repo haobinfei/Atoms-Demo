@@ -30,7 +30,7 @@ _Avoid_: 项目（见下）
 单个回合内智能体按序执行的编排过程：拆需求 → 出规格 → 定架构 → 生成代码 → 补元信息。
 
 **事件流（Event Stream）**:
-流水线执行中经 SSE 推给前端的按序事件序列，是时间线 UI 的唯一数据源。
+流水线执行中经 SSE 推给前端的按序事件序列，是时间线 UI 的唯一数据源。Postgres 是事实源，Redis Stream 是实时扇出通道；连接断线后按 seq 从 Postgres 重放。
 
 **规格（Spec）**:
 Emma 产出的结构化产品描述。每个回合结合完整历史重新推导，是全量重生成的输入。
@@ -41,6 +41,12 @@ Emma 产出的结构化产品描述。每个回合结合完整历史重新推导
 **构建器（Builder）**:
 服务端 esbuild 封装，把会话的文件集编成可预览的静态产物（`dist/index.html` + bundle.js）。
 
+**构建产物存储（Artifact Store）**:
+`/app` 构建结果的共享存储边界。未配置 COS 时兼容本地 `dist`；配置后每次成功构建写为
+不可变 `builds/<buildID>/...`，`current.json` 原子指向活动版本。发布先 stage 再 activate，
+最后记录 Publish，记录失败恢复旧指针；竞赛归档和胜者复制复用同一存储。COS 解决产物跨
+副本共享，但 app 源码仍在 workspace，跨节点部署需要共享 RWX 源码存储。
+
 **供应商目录（vendor/）**:
 预置的 React ESM 构建，是 esbuild resolve `react`/`react-dom` 的唯一来源，保证构建零网络依赖。
 
@@ -49,13 +55,13 @@ Emma 产出的结构化产品描述。每个回合结合完整历史重新推导
 _Avoid_: 任务（指 Job 时请说「任务」，勿与「回合」混用；回合是领域过程，任务是调度对象）
 
 **队列（Queue）**:
-任务的入口缓冲，有界（容量 = Worker 数 ×4），满了拒绝入队（调用方收到 503）而不是无限排队。接口形态（Enqueue/Start）为 Stage 2 外置队列（NATS/Redis）预留，进程内 channel 只是当前实现。
+任务的入口缓冲，使用 Redis Streams + 消费者组实现，提供跨副本的 at-least-once 投递。队列满或 Redis 不可用时调用方收到明确错误（503），不得静默丢任务。
 
 **Worker**:
-队列的消费者——同进程内的有界 goroutine 池（默认 3，QUEUE_WORKERS 可调）。Worker 数即 LLM 并发闸门。消费任务前必须再次原子认领会话（status CAS），认不上则丢弃该任务——与 HTTP 线程的 BeginTurn 构成「快速 409 + 正确性兜底」双层防线，交付语义 at-least-once。
+Redis Streams 消费者组中的执行者（默认 3，QUEUE_WORKERS 可调），可以分布在不同 server 副本上。Worker 数即 LLM 并发闸门。消费任务前必须再次原子认领会话（status CAS），认不上则丢弃该任务——与 HTTP 线程的 BeginTurn 构成「快速 409 + 正确性兜底」双层防线，交付语义 at-least-once。
 
 **崩溃恢复（Recovery）**:
-服务启动时扫描所有处于 building 状态的会话重新入队的机制。竞赛半成品整场重跑（覆盖半成品目录，语义干净）；重跑前追加一条恢复事件，不静默重花 LLM 调用。
+扫描所有处于 building 状态且无有效执行租约的会话重新入队的机制，由启动扫描或周期 sweeper 触发。竞赛半成品整场重跑（覆盖半成品目录，语义干净）；重跑前追加一条恢复事件，不静默重花 LLM 调用。
 
 ## 业务域
 
@@ -70,7 +76,7 @@ _Avoid_: 假支付、伪支付
 模拟收银台接受的固定假卡号（`4242 4242 4242 4242`），明示交易的模拟性质。
 
 **发布（Publish）**:
-把会话的构建产物开放为固定公网 URL（`/app/<id>/`）并生成二维码与发布记录的动作。
+把会话的构建产物开放为固定公网 URL（`/app/<id>/`）并生成二维码与发布记录的动作。发布记录是版本事实；Artifact Store 的 `current.json` 是对应活动产物指针，二者失败时保持旧版本可见。
 
 ## 部署域
 

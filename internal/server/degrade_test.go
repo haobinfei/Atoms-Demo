@@ -31,7 +31,10 @@ func TestSessionDegradesToTemplateProvider(t *testing.T) {
 		}},
 	})
 	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
 
 	resp, err := http.Post(ts.URL+"/api/sessions", "application/json", strings.NewReader(`{"prompt":"一家咖啡店的电商网站"}`))
 	if err != nil {

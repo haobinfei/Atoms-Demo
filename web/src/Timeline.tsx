@@ -8,8 +8,10 @@ const TYPE_LABEL: Record<string, string> = {
   architecture: '设计架构',
   file: '写入文件',
   score: '评分',
+  publish: '发布',
   contest: '竞赛',
   done: '完成',
+  recovered: '恢复重跑',
   error: '出错',
   agent: '工作中',
 }

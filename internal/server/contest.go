@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
@@ -122,10 +124,11 @@ func clampScore(n int) int {
 	return n
 }
 
-// runContest executes one competition asynchronously: one goroutine per
-// contestant, then Nina scores all ready versions, then the session turns
-// ready and the user picks a winner.
-func (s *Server) runContest(user, id, prompt string) {
+// runContest executes one competition: one goroutine per contestant (so the
+// whole contest is a single Queue Job whose internal fan-out is not throttled
+// by the Worker count), then Nina scores all ready versions, then the session
+// turns ready and the user picks a winner.
+func (s *Server) runContest(ctx context.Context, user, id, prompt string) {
 	competitors := s.competitors()
 	// Assign each contestant a unique entry name: two same-named
 	// providers (possible via Config.Competitors) would otherwise race
@@ -151,6 +154,17 @@ func (s *Server) runContest(user, id, prompt string) {
 		s.pipeline.EmitError(user, id, "竞赛初始化失败，请重试")
 		return
 	}
+	// A 崩溃恢复 (crash recovery) re-runs the whole contest: drop any
+	// half-written contest/<provider>/{app,dist} from the crashed attempt so
+	// stale files a contestant no longer emits cannot survive the re-run.
+	_ = os.RemoveAll(filepath.Join(s.store.Workspace(user, id), "contest"))
+	if s.artifacts != nil {
+		for _, name := range names {
+			if err := s.artifacts.DeletePrefix(ctx, artifact.ContestPrefix(id, name)); err != nil {
+				slog.Warn("clear stale contest artifacts", "session", id, "provider", name, "err", err)
+			}
+		}
+	}
 	s.pipeline.EmitContestStatus(user, id, "start",
 		fmt.Sprintf("竞赛开始：%s 并行生成中", strings.Join(names, "、")))
 
@@ -160,29 +174,36 @@ func (s *Server) runContest(user, id, prompt string) {
 		name := assigned[i]
 		go func(comp provider.Provider, name string) {
 			defer wg.Done()
-			s.runContestant(user, id, prompt, comp, name)
+			s.runContestant(ctx, user, id, prompt, comp, name)
 		}(c, name)
 	}
 	wg.Wait()
 
-	s.scoreContest(user, id, prompt)
+	s.scoreContest(ctx, user, id, prompt)
 }
 
 // runContestant drives one 参赛者: generate → validate → write → build,
 // all under contest/<provider>/ so versions stay independent.
-func (s *Server) runContestant(user, id, prompt string, comp provider.Provider, name string) {
+func (s *Server) runContestant(ctx context.Context, user, id, prompt string, comp provider.Provider, name string) {
 	ws := s.store.Workspace(user, id)
 	appDir := filepath.Join(ws, "contest", name, "app")
 	distDir := filepath.Join(ws, "contest", name, "dist")
 	fail := func(err error) {
 		slog.Error("contestant failed", "session", id, "provider", name, "err", err)
+		if s.artifacts != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if cleanupErr := s.artifacts.DeletePrefix(cleanupCtx, artifact.ContestPrefix(id, name)); cleanupErr != nil {
+				slog.Warn("clear failed contestant artifacts", "session", id, "provider", name, "err", cleanupErr)
+			}
+			cancel()
+		}
 		_ = s.store.UpdateContestEntry(user, id, name, func(entry *session.ContestEntry) {
 			entry.Status = "failed"
 		})
 		s.pipeline.EmitContestStatus(user, id, "failed", fmt.Sprintf("%s 生成失败：%s", name, err.Error()))
 	}
 
-	files, err := comp.Generate(context.Background(), prompt, func(string, string) {})
+	files, err := comp.Generate(ctx, prompt, func(string, string) {})
 	if err != nil {
 		fail(err)
 		return
@@ -199,6 +220,12 @@ func (s *Server) runContestant(user, id, prompt string, comp provider.Provider, 
 		fail(err)
 		return
 	}
+	if s.artifacts != nil {
+		if _, err := s.artifacts.PutTree(ctx, artifact.ContestPrefix(id, name), distDir); err != nil {
+			fail(fmt.Errorf("store build: %w", err))
+			return
+		}
+	}
 	_ = s.store.UpdateContestEntry(user, id, name, func(entry *session.ContestEntry) {
 		entry.Status = "ready"
 	})
@@ -207,7 +234,7 @@ func (s *Server) runContestant(user, id, prompt string, comp provider.Provider, 
 
 // scoreContest is Nina's judging pass over every ready version; graceful
 // degradation means a contest with zero ready versions still finishes.
-func (s *Server) scoreContest(user, id, prompt string) {
+func (s *Server) scoreContest(ctx context.Context, user, id, prompt string) {
 	sess, err := s.store.Load(user, id)
 	if err != nil {
 		slog.Error("load session for scoring", "session", id, "err", err)
@@ -226,7 +253,7 @@ func (s *Server) scoreContest(user, id, prompt string) {
 			slog.Error("read contestant files for scoring", "session", id, "provider", entry.Provider, "err", err)
 			continue
 		}
-		scores, comment, err := s.scoreFunc()(context.Background(), prompt, files)
+		scores, comment, err := s.scoreFunc()(ctx, prompt, files)
 		if err != nil {
 			slog.Error("nina scoring", "session", id, "provider", entry.Provider, "err", err)
 			continue
@@ -299,8 +326,16 @@ func (s *Server) handleWinner(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "provider is required")
 		return
 	}
-	if _, err := s.store.Load(user, id); err != nil {
+	sess, err := s.store.Load(user, id)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// The contest Job may be queued but not yet have called StartContest, so
+	// there is no Contest object yet. It is still a running contest from the
+	// caller's perspective: answer 409 instead of the misleading 404.
+	if sess.Status == "building" && (sess.Kind == "contest" || sess.Contest != nil) {
+		writeError(w, http.StatusConflict, "contest is still running")
 		return
 	}
 	// Claim the winner atomically under the store lock first; a second
@@ -323,7 +358,13 @@ func (s *Server) handleWinner(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := session.CopyDirTree(filepath.Join(ws, "contest", req.Provider, "dist"), filepath.Join(ws, "dist")); err != nil {
+	if s.artifacts != nil {
+		if _, err := s.artifacts.CopyTree(r.Context(), artifact.ContestPrefix(id, req.Provider), artifact.SessionPrefix(id)); err != nil {
+			_ = s.store.ClearContestWinner(user, id)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else if err := session.CopyDirTree(filepath.Join(ws, "contest", req.Provider, "dist"), filepath.Join(ws, "dist")); err != nil {
 		_ = s.store.ClearContestWinner(user, id)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
