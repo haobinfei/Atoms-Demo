@@ -9,6 +9,7 @@ import (
 	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/server"
+	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
 
 func main() {
@@ -31,6 +32,15 @@ func main() {
 			LocalModel:      os.Getenv("LOCAL_LLM_MODEL"),
 		},
 	}
+	storeMode := "file"
+	if dsn := os.Getenv("DATABASE_DSN"); dsn != "" {
+		store, err := session.NewPGStore(cfg.WorkspaceDir, dsn)
+		if err != nil {
+			log.Fatalf("postgres store: %v", err)
+		}
+		cfg.Store = store
+		storeMode = "postgres"
+	}
 	if authMode == "oidc" {
 		mw, err := auth.New(context.Background(), auth.Config{
 			Issuer:          getenv("OIDC_ISSUER", "https://auth.ss-vip.cn"),
@@ -46,8 +56,8 @@ func main() {
 		cfg.Auth = mw
 	}
 	addr := ":" + getenv("PORT", "4173")
-	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=%s)",
-		addr, cfg.WorkspaceDir, authMode)
+	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=%s, store=%s)",
+		addr, cfg.WorkspaceDir, authMode, storeMode)
 	log.Fatal(http.ListenAndServe(addr, server.New(cfg).Handler()))
 }
 

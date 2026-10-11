@@ -38,6 +38,9 @@ type Config struct {
 	Prov provider.Provider
 	// Env configures the fallback chain when Prov is nil.
 	Env provider.EnvConfig
+	// Store overrides session persistence; nil means FileStore under
+	// WorkspaceDir. Production passes a PGStore via DATABASE_DSN.
+	Store session.Store
 	// Competitors are the 参赛者 for 竞赛 (Competition) mode; defaults to
 	// the members of the fallback chain (gemma 离线时自动减员).
 	Competitors []provider.Provider
@@ -47,7 +50,7 @@ type Config struct {
 }
 
 type Server struct {
-	store    *session.Store
+	store    session.Store
 	cfg      Config
 	broker   *pipeline.Broker
 	pipeline *pipeline.Pipeline
@@ -62,7 +65,10 @@ func New(cfg Config) *Server {
 	if cfg.DevUser == "" {
 		cfg.DevUser = "dev-user"
 	}
-	store := session.NewStore(cfg.WorkspaceDir)
+	store := cfg.Store
+	if store == nil {
+		store = session.NewStore(cfg.WorkspaceDir)
+	}
 	broker := pipeline.NewBroker()
 	prov := cfg.Prov
 	if prov == nil {

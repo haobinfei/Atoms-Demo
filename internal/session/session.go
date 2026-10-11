@@ -89,22 +89,22 @@ type Message struct {
 }
 
 // Store persists sessions as workspace/<owner>/<id>/session.json.
-type Store struct {
+type FileStore struct {
 	dir string
 	mu  sync.Mutex
 }
 
-func NewStore(dir string) *Store {
-	return &Store{dir: dir}
+func NewStore(dir string) *FileStore {
+	return &FileStore{dir: dir}
 }
 
-func (s *Store) Dir() string { return s.dir }
+func (s *FileStore) Dir() string { return s.dir }
 
-func (s *Store) Workspace(owner, id string) string {
+func (s *FileStore) Workspace(owner, id string) string {
 	return filepath.Join(s.dir, owner, id)
 }
 
-func (s *Store) Create(owner, prompt string) (*Session, error) {
+func (s *FileStore) Create(owner, prompt string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -153,7 +153,7 @@ func (s *Store) Create(owner, prompt string) (*Session, error) {
 // IndexOwner resolves a session id to its owner via the public-URL index.
 // The returned owner is validated so a tampered index can never steer path
 // resolution outside the workspace.
-func (s *Store) IndexOwner(id string) (string, error) {
+func (s *FileStore) IndexOwner(id string) (string, error) {
 	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
 		return "", fmt.Errorf("invalid id")
 	}
@@ -183,13 +183,13 @@ func ValidOwner(name string) bool {
 	return true
 }
 
-func (s *Store) Load(owner, id string) (*Session, error) {
+func (s *FileStore) Load(owner, id string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.loadLocked(owner, id)
 }
 
-func (s *Store) loadLocked(owner, id string) (*Session, error) {
+func (s *FileStore) loadLocked(owner, id string) (*Session, error) {
 	data, err := os.ReadFile(filepath.Join(s.Workspace(owner, id), "session.json"))
 	if err != nil {
 		return nil, err
@@ -207,14 +207,14 @@ func (s *Store) loadLocked(owner, id string) (*Session, error) {
 	return &sess, nil
 }
 
-func (s *Store) Save(owner string, sess *Session) error {
+func (s *FileStore) Save(owner string, sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess.UpdatedAt = time.Now()
 	return s.saveLocked(sess)
 }
 
-func (s *Store) saveLocked(sess *Session) error {
+func (s *FileStore) saveLocked(sess *Session) error {
 	data, err := json.MarshalIndent(sess, "", "  ")
 	if err != nil {
 		return err
@@ -223,7 +223,7 @@ func (s *Store) saveLocked(sess *Session) error {
 }
 
 // AppendEvent assigns the next sequence number, appends and persists.
-func (s *Store) AppendEvent(owner, id string, ev Event) (Event, error) {
+func (s *FileStore) AppendEvent(owner, id string, ev Event) (Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -242,7 +242,7 @@ func (s *Store) AppendEvent(owner, id string, ev Event) (Event, error) {
 }
 
 // AppendMessage persists one user utterance to the session timeline.
-func (s *Store) AppendMessage(owner, id string, msg Message) error {
+func (s *FileStore) AppendMessage(owner, id string, msg Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -260,7 +260,7 @@ func (s *Store) AppendMessage(owner, id string, msg Message) error {
 // requests serialize instead of racing two pipelines: the first caller wins,
 // later ones see ok=false and must be rejected. prev is the status to
 // restore with SetStatus if the caller fails after winning.
-func (s *Store) BeginTurn(owner, id string) (prev string, ok bool, err error) {
+func (s *FileStore) BeginTurn(owner, id string) (prev string, ok bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -279,7 +279,7 @@ func (s *Store) BeginTurn(owner, id string) (prev string, ok bool, err error) {
 }
 
 // SetStatus overwrites the session status (turn rollback, future admin ops).
-func (s *Store) SetStatus(owner, id, status string) error {
+func (s *FileStore) SetStatus(owner, id, status string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -292,7 +292,7 @@ func (s *Store) SetStatus(owner, id, status string) error {
 
 // RecordPublish appends one publish entry, assigning the next version
 // (1-based, gapless) under the store lock.
-func (s *Store) RecordPublish(owner, id, url string) (Publish, error) {
+func (s *FileStore) RecordPublish(owner, id, url string) (Publish, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -308,7 +308,7 @@ func (s *Store) RecordPublish(owner, id, url string) (Publish, error) {
 }
 
 // StartContest initializes the contest state with the given 参赛者 names.
-func (s *Store) StartContest(owner, id string, providers []string) error {
+func (s *FileStore) StartContest(owner, id string, providers []string) error {
 	return s.update(owner, id, func(sess *Session) {
 		sess.Contest = &Contest{Entries: make([]ContestEntry, 0, len(providers))}
 		for _, name := range providers {
@@ -323,7 +323,7 @@ func (s *Store) StartContest(owner, id string, providers []string) error {
 // the build goroutines each own one entry, and a stale-copy save here
 // would drop sibling updates. Every entry with a matching provider name
 // is updated, so two same-named contestants cannot wedge each other.
-func (s *Store) UpdateContestEntry(owner, id, provider string, mutate func(*ContestEntry)) error {
+func (s *FileStore) UpdateContestEntry(owner, id, provider string, mutate func(*ContestEntry)) error {
 	return s.update(owner, id, func(sess *Session) {
 		if sess.Contest == nil {
 			return
@@ -337,7 +337,7 @@ func (s *Store) UpdateContestEntry(owner, id, provider string, mutate func(*Cont
 }
 
 // FinishContest marks the contest scored and done.
-func (s *Store) FinishContest(owner, id string) error {
+func (s *FileStore) FinishContest(owner, id string) error {
 	return s.update(owner, id, func(sess *Session) {
 		if sess.Contest != nil {
 			sess.Contest.Done = true
@@ -346,7 +346,7 @@ func (s *Store) FinishContest(owner, id string) error {
 }
 
 // PickContestWinner records the user's choice.
-func (s *Store) PickContestWinner(owner, id, provider string) error {
+func (s *FileStore) PickContestWinner(owner, id, provider string) error {
 	return s.update(owner, id, func(sess *Session) {
 		if sess.Contest != nil {
 			sess.Contest.Winner = provider
@@ -367,7 +367,7 @@ var (
 // under the store lock, so two concurrent POST /winner requests cannot
 // both pass the checks. The caller installs the winner's files onto the
 // session root afterwards; on failure there it must ClearContestWinner.
-func (s *Store) ClaimContestWinner(owner, id string, provider string) error {
+func (s *FileStore) ClaimContestWinner(owner, id string, provider string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -398,7 +398,7 @@ func (s *Store) ClaimContestWinner(owner, id string, provider string) error {
 
 // ClearContestWinner rolls back a claim when installing the winner's
 // files onto the session root failed.
-func (s *Store) ClearContestWinner(owner, id string) error {
+func (s *FileStore) ClearContestWinner(owner, id string) error {
 	return s.update(owner, id, func(sess *Session) {
 		if sess.Contest != nil {
 			sess.Contest.Winner = ""
@@ -410,7 +410,7 @@ func (s *Store) ClearContestWinner(owner, id string) error {
 // update first. Reading every session.json under the single store lock is
 // a deliberate tradeoff at demo scale — do not copy this pattern onto a
 // high-traffic path.
-func (s *Store) List(owner string) ([]Session, error) {
+func (s *FileStore) List(owner string) ([]Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries, err := os.ReadDir(filepath.Join(s.dir, owner))
@@ -441,20 +441,20 @@ func (s *Store) List(owner string) ([]Session, error) {
 }
 
 // Rename sets the display name of a session.
-func (s *Store) Rename(owner, id, name string) error {
+func (s *FileStore) Rename(owner, id, name string) error {
 	return s.update(owner, id, func(sess *Session) {
 		sess.Name = name
 	})
 }
 
 // SetPinned toggles the pin that floats a session to the dashboard front.
-func (s *Store) SetPinned(owner, id string, pinned bool) error {
+func (s *FileStore) SetPinned(owner, id string, pinned bool) error {
 	return s.update(owner, id, func(sess *Session) {
 		sess.Pinned = pinned
 	})
 }
 
-func (s *Store) update(owner, id string, mutate func(*Session)) error {
+func (s *FileStore) update(owner, id string, mutate func(*Session)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -470,7 +470,7 @@ func (s *Store) update(owner, id string, mutate func(*Session)) error {
 
 // Duplicate deep-copies a session under a fresh id: history and generated
 // files travel along, publish records reset (the public URL is id-based).
-func (s *Store) Duplicate(owner, id string) (*Session, error) {
+func (s *FileStore) Duplicate(owner, id string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	src, err := s.loadLocked(owner, id)
@@ -522,7 +522,7 @@ func (s *Store) Duplicate(owner, id string) (*Session, error) {
 }
 
 // Delete removes the workspace and the public-URL index entry.
-func (s *Store) Delete(owner, id string) error {
+func (s *FileStore) Delete(owner, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {

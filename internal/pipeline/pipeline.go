@@ -65,7 +65,7 @@ func (b *Broker) Publish(id string, ev session.Event) {
 
 // Pipeline runs one turn for a session.
 type Pipeline struct {
-	Store  *session.Store
+	Store  session.Store
 	Broker *Broker
 	Prov   provider.Provider
 	// Builder compiles the written files into a previewable dist; nil skips
