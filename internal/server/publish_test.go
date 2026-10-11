@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 )
@@ -123,21 +124,30 @@ func TestPublishVersionsAndHistory(t *testing.T) {
 	}
 }
 
+// publish triggers a 发布 (Publish) and waits for the Worker to record the new
+// version. The HTTP call is accepted immediately (202); the rebuild runs
+// asynchronously, so we poll the publish history for the new entry.
 func publish(t *testing.T, tsURL, id string) testPublish {
 	t.Helper()
+	before := len(publishHistory(t, tsURL, id))
 	resp, err := http.Post(tsURL+"/api/sessions/"+id+"/publish", "application/json", nil)
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("publish status = %d, want 200", resp.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("publish status = %d, want 202", resp.StatusCode)
 	}
-	var pub testPublish
-	if err := json.NewDecoder(resp.Body).Decode(&pub); err != nil {
-		t.Fatalf("decode publish: %v", err)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		history := publishHistory(t, tsURL, id)
+		if len(history) > before {
+			return history[len(history)-1]
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return pub
+	t.Fatalf("publish did not record a new version within the deadline")
+	return testPublish{}
 }
 
 func publishHistory(t *testing.T, tsURL, id string) []testPublish {
@@ -180,27 +190,53 @@ func TestPublishFailedRebuildKeepsServingDist(t *testing.T) {
 		t.Fatalf("publish after corruption: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("publish after corruption status = %d, want 500", resp.StatusCode)
+	// Publish is asynchronous now: the request is accepted, and the failure
+	// surfaces as an error event with the session restored to "ready".
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("publish after corruption status = %d, want 202", resp.StatusCode)
 	}
+	waitForPublishFailure(t, ts.URL, id)
 
 	// The previously published version is still served untouched.
 	assertServedCSS(t, ts.URL, id, "#f97316")
+}
 
-	statusResp, err := http.Get(ts.URL + "/api/sessions/" + id)
-	if err != nil {
-		t.Fatalf("get session: %v", err)
+// waitForPublishFailure polls the session until the async publish Worker has
+// restored it to "ready" and appended an error event, or the deadline passes.
+func waitForPublishFailure(t *testing.T, tsURL, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(tsURL + "/api/sessions/" + id)
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		var sess struct {
+			Status string `json:"status"`
+			Events []struct {
+				Type    string         `json:"type"`
+				Payload map[string]any `json:"payload"`
+			} `json:"events"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
+			resp.Body.Close()
+			t.Fatalf("decode session: %v", err)
+		}
+		resp.Body.Close()
+		if sess.Status != "ready" {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		for _, ev := range sess.Events {
+			if ev.Type == "error" {
+				if msg, _ := ev.Payload["message"].(string); strings.Contains(msg, "发布失败") {
+					return
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	var sess struct {
-		Status string `json:"status"`
-	}
-	if err := json.NewDecoder(statusResp.Body).Decode(&sess); err != nil {
-		t.Fatalf("decode session: %v", err)
-	}
-	statusResp.Body.Close()
-	if sess.Status != "ready" {
-		t.Fatalf("status after failed publish = %q, want ready", sess.Status)
-	}
+	t.Fatalf("publish failure was not reported on the timeline within the deadline")
 }
 
 // assertServedCSS fetches the built stylesheet through the public /app URL

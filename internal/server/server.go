@@ -184,8 +184,7 @@ func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
 		// parallel inside, so a single Worker never serializes them.
 		s.runContest(ctx, job.Owner, job.SessionID, sess.Prompt)
 	case jobqueue.KindPublish:
-		// Not migrated onto the Queue yet (#20); a Job that arrives is
-		// acknowledged without side effects rather than run inline.
+		s.runPublish(ctx, job.Owner, job.SessionID)
 	}
 	return nil
 }
@@ -800,8 +799,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
 }
 
-// handlePublish rebuilds the dist and records one 发布 (Publish): the
-// public, credential-free URL /app/{id}/ now serves this version.
+// handlePublish claims the session and puts a 发布 (Publish) Job on the Queue,
+// returning immediately. The rebuild runs on a Worker (runPublish); the client
+// polls the publish history for the new version. The synchronous pre-checks
+// keep 404/409/400 behavior identical to the old inline handler.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	user := s.requestUser(r)
@@ -810,7 +811,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Claim the session atomically: a chat turn starting mid-publish would
-	// otherwise race this rebuild for the same distDir. The session shows
+	// otherwise race the rebuild for the same distDir. The session shows
 	// "building" for the duration, which also 409s chat requests.
 	prev, ok, err := s.store.BeginTurn(user, id)
 	if err != nil {
@@ -822,6 +823,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	restore := func() { _ = s.store.SetStatus(user, id, prev) }
+	// Pre-validate synchronously so "nothing to publish" stays a 400 rather
+	// than an async error event the caller cannot correlate.
 	appDir, err := s.appDir(user, id)
 	if err != nil {
 		restore()
@@ -833,10 +836,36 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no app to publish yet")
 		return
 	}
+	if err := s.enqueueJob(user, id, jobqueue.KindPublish); err != nil {
+		// Queue full / Redis down: roll back and surface 503, never a silent
+		// drop of the publish.
+		slog.Error("enqueue publish", "session", id, "err", err)
+		restore()
+		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "publishing"})
+}
+
+// runPublish is the Worker-side 发布 (Publish) execution: rebuild dist into a
+// side directory and swap, so a failed rebuild never takes down the version
+// /app is currently serving. Any failure keeps the old dist, restores the
+// session to "ready", and lands an error on the timeline; success records a
+// version and emits a publish event.
+func (s *Server) runPublish(_ context.Context, user, id string) {
+	fail := func(msg string) {
+		slog.Error("publish failed", "session", id, "detail", msg)
+		_ = s.store.SetStatus(user, id, "ready")
+		s.pipeline.EmitError(user, id, "发布失败："+msg)
+	}
+	appDir, err := s.appDir(user, id)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
 	ws, err := s.workspaceDir(user, id)
 	if err != nil {
-		restore()
-		writeError(w, http.StatusBadRequest, err.Error())
+		fail(err.Error())
 		return
 	}
 	distDir := filepath.Join(ws, "dist")
@@ -849,16 +878,14 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	_ = os.RemoveAll(bakDir)
 	if err := s.builder.Build(appDir, tmpDir); err != nil {
 		_ = os.RemoveAll(tmpDir)
-		restore()
-		writeError(w, http.StatusInternalServerError, "rebuild failed: "+err.Error())
+		fail("rebuild failed: " + err.Error())
 		return
 	}
 	swapped := false
 	if _, err := os.Stat(distDir); err == nil {
 		if err := os.Rename(distDir, bakDir); err != nil {
 			_ = os.RemoveAll(tmpDir)
-			restore()
-			writeError(w, http.StatusInternalServerError, "stash previous dist: "+err.Error())
+			fail("stash previous dist: " + err.Error())
 			return
 		}
 		swapped = true
@@ -868,8 +895,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 			_ = os.Rename(bakDir, distDir)
 		}
 		_ = os.RemoveAll(tmpDir)
-		restore()
-		writeError(w, http.StatusInternalServerError, "activate new dist: "+err.Error())
+		fail("activate new dist: " + err.Error())
 		return
 	}
 	pub, err := s.store.RecordPublish(user, id, "/app/"+id+"/")
@@ -882,13 +908,12 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 				slog.Error("restore previous dist after record failure", "session", id, "err", err)
 			}
 		}
-		restore()
-		writeError(w, http.StatusInternalServerError, err.Error())
+		fail(err.Error())
 		return
 	}
 	_ = os.RemoveAll(bakDir)
 	_ = s.store.SetStatus(user, id, "ready")
-	writeJSON(w, http.StatusOK, pub)
+	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
 }
 
 // handleGetPublishes returns the full publish history, oldest first.

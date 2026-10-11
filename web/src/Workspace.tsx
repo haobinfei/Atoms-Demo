@@ -62,7 +62,7 @@ export default function Workspace({
             setSession((prev) => (prev ? { ...prev, status } : prev))
             if (status === 'ready') setBuiltAt(new Date().toISOString())
           }
-          if (ev.type === 'contest' || ev.type === 'score' || ev.type === 'done') {
+          if (ev.type === 'contest' || ev.type === 'score' || ev.type === 'publish' || ev.type === 'done') {
             // Contest progress lives on the session; refetch so the
             // score cards and entry statuses stay in sync.
             void getSession(sessionId).then(setSession).catch(() => {})

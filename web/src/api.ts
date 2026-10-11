@@ -1,6 +1,6 @@
 export interface SessionEvent {
   seq: number
-  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'contest' | 'done' | 'error' | 'agent' | 'message'
+  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'contest' | 'publish' | 'done' | 'error' | 'agent' | 'message'
   agent?: string
   payload?: Record<string, unknown>
   at: string
@@ -150,9 +150,19 @@ export interface Publish {
 }
 
 export async function publishSession(id: string): Promise<Publish> {
+  const before = await getPublishes(id).catch(() => [] as Publish[])
   const resp = await fetch(`/api/sessions/${id}/publish`, { method: 'POST' })
   if (!resp.ok) throw new Error(`publish: ${resp.status}`)
-  return (await resp.json()) as Publish
+  // The rebuild runs on a Worker and returns 202 immediately; poll the
+  // history until the new version lands (or the deadline passes).
+  const want = before.length + 1
+  const deadline = Date.now() + 15000
+  while (Date.now() < deadline) {
+    const list = await getPublishes(id)
+    if (list.length >= want) return list[list.length - 1]
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error('publish: timed out waiting for the new version')
 }
 
 export async function getPublishes(id: string): Promise<Publish[]> {

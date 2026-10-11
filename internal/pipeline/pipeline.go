@@ -88,6 +88,16 @@ func (p *Pipeline) EmitScore(owner, id, provider string, scores session.Scores, 
 	}})
 }
 
+// EmitPublishDone announces a finished 发布 (Publish): the rebuilt version is
+// now live at url. Emitted by the publish Worker, not the HTTP handler.
+func (p *Pipeline) EmitPublishDone(owner, id string, version int, url string) {
+	p.emit(owner, id, session.Event{Type: "publish", Payload: map[string]any{
+		"version": version,
+		"url":     url,
+		"detail":  fmt.Sprintf("已发布 v%d", version),
+	}})
+}
+
 // EmitContestDone closes the contest: scoring finished, session ready,
 // waiting for the user's winner pick.
 func (p *Pipeline) EmitContestDone(owner, id string) {

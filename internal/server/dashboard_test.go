@@ -169,8 +169,10 @@ func TestDashboardLifecycle(t *testing.T) {
 		t.Fatalf("decode duplicate: %v", err)
 	}
 	dupSess.Body.Close()
-	if len(dupFull.Messages) != 2 || len(dupFull.Events) != 7 {
-		t.Fatalf("duplicate history = %d messages, %d events; want 2/7",
+	// 7 turn events + 1 publish completion event (the async publish emits
+	// a "publish" signal on the timeline).
+	if len(dupFull.Messages) != 2 || len(dupFull.Events) != 8 {
+		t.Fatalf("duplicate history = %d messages, %d events; want 2/8",
 			len(dupFull.Messages), len(dupFull.Events))
 	}
 	app, err := http.Get(fmt.Sprintf("%s/app/%s/", ts.URL, dup.SessionID))
