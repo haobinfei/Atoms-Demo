@@ -28,6 +28,11 @@ const (
 	entryCSS = "main.css"
 )
 
+var (
+	scriptTagRE    = regexp.MustCompile(`(?is)<script\b[^>]*>`)
+	entrySrcAttrRE = regexp.MustCompile(`(?i)(\bsrc\s*=\s*)(["'])(?:\./)?/?(?:src/)?main\.tsx(["'])`)
+)
+
 // Build bundles appDir/src/main.tsx into distDir (main.js + main.css) and
 // rewrites the app's index.html to load them.
 func (b *Builder) Build(appDir, distDir string) error {
@@ -129,14 +134,25 @@ func (b *Builder) rewriteIndex(appDir, distDir string) error {
 		return fmt.Errorf("read index.html: %w", err)
 	}
 	html := string(raw)
-	if strings.Contains(html, "/src/main.tsx") {
-		html = strings.Replace(html, `src="/src/main.tsx"`, `src="./`+entryJS+`"`, 1)
-		html = strings.Replace(html, `src="./src/main.tsx"`, `src="./`+entryJS+`"`, 1)
-	} else if strings.Contains(html, "</body>") {
-		html = strings.Replace(html, "</body>",
-			`<script type="module" src="./`+entryJS+`"></script></body>`, 1)
-	} else {
-		html += `<script type="module" src="./` + entryJS + `"></script>`
+	rewritten := false
+	html = scriptTagRE.ReplaceAllStringFunc(html, func(tag string) string {
+		return entrySrcAttrRE.ReplaceAllStringFunc(tag, func(attr string) string {
+			rewritten = true
+			quote := `"`
+			if i := strings.Index(attr, `"`); i < 0 {
+				quote = `'`
+			}
+			prefix := attr[:strings.Index(attr, "=")+1]
+			return prefix + quote + "./" + entryJS + quote
+		})
+	})
+	if !rewritten {
+		if strings.Contains(html, "</body>") {
+			html = strings.Replace(html, "</body>",
+				`<script type="module" src="./`+entryJS+`"></script></body>`, 1)
+		} else {
+			html += `<script type="module" src="./` + entryJS + `"></script>`
+		}
 	}
 	if _, err := os.Stat(filepath.Join(distDir, entryCSS)); err == nil &&
 		!strings.Contains(html, entryCSS) {

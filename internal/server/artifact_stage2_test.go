@@ -76,6 +76,9 @@ func TestServerReplicasSharePublishedArtifacts(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `id="root"`) {
 		t.Fatalf("replica B preview status=%d body=%q", resp.StatusCode, string(body))
 	}
+	if strings.Contains(string(body), "/src/main.tsx") || !strings.Contains(string(body), `src="./main.js"`) {
+		t.Fatalf("replica B preview does not load the built bundle: %q", string(body))
+	}
 
 	// Change the source directly so only the publish path can make the new
 	// version visible, then verify replica B serves the published build.

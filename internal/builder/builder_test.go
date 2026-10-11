@@ -71,6 +71,38 @@ func TestBuildProducesRunnableDist(t *testing.T) {
 	}
 }
 
+func TestBuildRewritesSingleQuotedEntryScript(t *testing.T) {
+	dir := t.TempDir()
+	files := provider.FileSet{
+		"index.html": `<!doctype html>
+<html lang='zh-CN'>
+<head><title>我的博客</title></head>
+<body><div id='root'></div><script type='module' src='/src/main.tsx'></script></body>
+</html>`,
+		"src/main.tsx": `import { createRoot } from 'react-dom/client'
+function App() { return <main>博客内容</main> }
+createRoot(document.getElementById('root')!).render(<App />)`,
+	}
+
+	distDir := filepath.Join(dir, "dist")
+	if err := builder.New().Build(writeApp(t, dir, files), distDir); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	index, err := os.ReadFile(filepath.Join(distDir, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(index), "/src/main.tsx") {
+		t.Fatalf("dist/index.html still references source entry: %s", index)
+	}
+	if !strings.Contains(string(index), `src='./main.js'`) {
+		t.Fatalf("dist/index.html does not reference emitted bundle: %s", index)
+	}
+	if strings.Count(string(index), "src='./main.js'") != 1 {
+		t.Fatalf("dist/index.html must reference the emitted bundle exactly once: %s", index)
+	}
+}
+
 func TestBuildFailsOnSyntaxErrorAndUnknownImport(t *testing.T) {
 	b := builder.New()
 

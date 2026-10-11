@@ -29,6 +29,12 @@ func TestPreviewServesBuiltApp(t *testing.T) {
 	if !strings.Contains(string(body), `id="root"`) {
 		t.Fatal("preview index.html missing root mount point")
 	}
+	if strings.Contains(string(body), "/src/main.tsx") {
+		t.Fatalf("preview index.html still points at source entry instead of built bundle: %s", body)
+	}
+	if !strings.Contains(string(body), `src="./main.js"`) {
+		t.Fatalf("preview index.html does not point at built bundle: %s", body)
+	}
 
 	js, err := http.Get(ts.URL + "/app/" + id + "/main.js")
 	if err != nil || js.StatusCode != http.StatusOK {
