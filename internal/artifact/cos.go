@@ -2,6 +2,8 @@ package artifact
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // COSConfig configures Tencent Cloud COS through its S3-compatible API.
@@ -73,8 +77,53 @@ func newCOSBackend(cfg COSConfig) (*cosBackend, error) {
 		)),
 		UsePathStyle: true,
 		HTTPClient:   &http.Client{Timeout: 2 * time.Minute},
+		APIOptions: []func(*middleware.Stack) error{
+			addCOSDeleteObjectsContentMD5,
+		},
 	})
 	return &cosBackend{client: client, bucket: cfg.Bucket}, nil
+}
+
+// Tencent COS requires Content-MD5 on DeleteObjects even though current AWS
+// SDKs no longer expose that field on the operation input. Add it after the
+// XML body has been serialized and before SigV4 signs the request headers.
+func addCOSDeleteObjectsContentMD5(stack *middleware.Stack) error {
+	return stack.Finalize.Insert(middleware.FinalizeMiddlewareFunc(
+		"COSDeleteObjectsContentMD5",
+		func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (
+			out middleware.FinalizeOutput, metadata middleware.Metadata, err error,
+		) {
+			if middleware.GetOperationName(ctx) != "DeleteObjects" {
+				return next.HandleFinalize(ctx, in)
+			}
+			req, ok := in.Request.(*smithyhttp.Request)
+			if !ok {
+				return out, metadata, fmt.Errorf("COS DeleteObjects request has unexpected type %T", in.Request)
+			}
+			stream := req.GetStream()
+			if stream == nil {
+				req.Header.Set("Content-MD5", contentMD5(nil))
+				return next.HandleFinalize(ctx, in)
+			}
+			if !req.IsStreamSeekable() {
+				return out, metadata, errors.New("COS DeleteObjects request body is not seekable")
+			}
+			body, err := io.ReadAll(stream)
+			if err != nil {
+				return out, metadata, fmt.Errorf("read COS DeleteObjects request body: %w", err)
+			}
+			if err := req.RewindStream(); err != nil {
+				return out, metadata, fmt.Errorf("rewind COS DeleteObjects request body: %w", err)
+			}
+			req.Header.Set("Content-MD5", contentMD5(body))
+			return next.HandleFinalize(ctx, in)
+		},
+	), "Signing", middleware.Before)
+}
+
+func contentMD5(body []byte) string {
+	sum := md5.Sum(body)
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 func regionFromHost(host string) string {
