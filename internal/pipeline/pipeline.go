@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -31,6 +32,9 @@ type Pipeline struct {
 	// Builder compiles the written files into a previewable dist; nil skips
 	// building (kept optional so provider-only tests stay light).
 	Builder *builder.Builder
+	// Artifacts stores each successful build as an immutable snapshot and
+	// activates it for /app. nil keeps the legacy local dist behavior.
+	Artifacts *artifact.Store
 	// StepDelay keeps the timeline human-readable in demos; tests may shrink it.
 	StepDelay time.Duration
 }
@@ -206,8 +210,19 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 				// Drop any stale dist so /app never serves an outdated build
 				// while the session is failed.
 				_ = os.RemoveAll(distDir)
+				p.dropArtifacts(id)
 				status = "failed"
 				fail(err)
+			} else if p.Artifacts != nil {
+				if _, err := p.Artifacts.PutTree(ctx, artifact.SessionPrefix(id), distDir); err != nil {
+					// A multi-replica /app reads from the shared store, so a
+					// failed upload must fail the turn rather than expose a
+					// version only one replica can see.
+					_ = os.RemoveAll(distDir)
+					p.dropArtifacts(id)
+					status = "failed"
+					fail(fmt.Errorf("store build: %w", err))
+				}
 			}
 		}
 	}
@@ -318,6 +333,20 @@ func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet) error {
 		}
 	}
 	return nil
+}
+
+// dropArtifacts removes the active build after a failed turn, matching the
+// legacy behavior of deleting a stale local dist. Cleanup is best effort and
+// uses a fresh context because the Job context may already be canceled.
+func (p *Pipeline) dropArtifacts(id string) {
+	if p.Artifacts == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.Artifacts.ClearCurrent(ctx, artifact.SessionPrefix(id)); err != nil {
+		slog.Warn("drop failed build artifacts", "session", id, "err", err)
+	}
 }
 
 func (p *Pipeline) setStatus(owner, id, status string) {

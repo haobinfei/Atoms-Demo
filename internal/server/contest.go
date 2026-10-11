@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
@@ -156,6 +158,13 @@ func (s *Server) runContest(ctx context.Context, user, id, prompt string) {
 	// half-written contest/<provider>/{app,dist} from the crashed attempt so
 	// stale files a contestant no longer emits cannot survive the re-run.
 	_ = os.RemoveAll(filepath.Join(s.store.Workspace(user, id), "contest"))
+	if s.artifacts != nil {
+		for _, name := range names {
+			if err := s.artifacts.DeletePrefix(ctx, artifact.ContestPrefix(id, name)); err != nil {
+				slog.Warn("clear stale contest artifacts", "session", id, "provider", name, "err", err)
+			}
+		}
+	}
 	s.pipeline.EmitContestStatus(user, id, "start",
 		fmt.Sprintf("竞赛开始：%s 并行生成中", strings.Join(names, "、")))
 
@@ -181,6 +190,13 @@ func (s *Server) runContestant(ctx context.Context, user, id, prompt string, com
 	distDir := filepath.Join(ws, "contest", name, "dist")
 	fail := func(err error) {
 		slog.Error("contestant failed", "session", id, "provider", name, "err", err)
+		if s.artifacts != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if cleanupErr := s.artifacts.DeletePrefix(cleanupCtx, artifact.ContestPrefix(id, name)); cleanupErr != nil {
+				slog.Warn("clear failed contestant artifacts", "session", id, "provider", name, "err", cleanupErr)
+			}
+			cancel()
+		}
 		_ = s.store.UpdateContestEntry(user, id, name, func(entry *session.ContestEntry) {
 			entry.Status = "failed"
 		})
@@ -203,6 +219,12 @@ func (s *Server) runContestant(ctx context.Context, user, id, prompt string, com
 	if err := s.builder.Build(appDir, distDir); err != nil {
 		fail(err)
 		return
+	}
+	if s.artifacts != nil {
+		if _, err := s.artifacts.PutTree(ctx, artifact.ContestPrefix(id, name), distDir); err != nil {
+			fail(fmt.Errorf("store build: %w", err))
+			return
+		}
 	}
 	_ = s.store.UpdateContestEntry(user, id, name, func(entry *session.ContestEntry) {
 		entry.Status = "ready"
@@ -336,7 +358,13 @@ func (s *Server) handleWinner(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := session.CopyDirTree(filepath.Join(ws, "contest", req.Provider, "dist"), filepath.Join(ws, "dist")); err != nil {
+	if s.artifacts != nil {
+		if _, err := s.artifacts.CopyTree(r.Context(), artifact.ContestPrefix(id, req.Provider), artifact.SessionPrefix(id)); err != nil {
+			_ = s.store.ClearContestWinner(user, id)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else if err := session.CopyDirTree(filepath.Join(ws, "contest", req.Provider, "dist"), filepath.Join(ws, "dist")); err != nil {
 		_ = s.store.ClearContestWinner(user, id)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

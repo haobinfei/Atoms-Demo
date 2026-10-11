@@ -12,12 +12,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
@@ -45,6 +47,10 @@ type Config struct {
 	// Store overrides session persistence; nil means FileStore under
 	// WorkspaceDir. Production passes a PGStore via DATABASE_DSN.
 	Store session.Store
+	// Artifacts is the shared build-output store. Production passes a COS
+	// store so /app reads the same immutable snapshot from every replica;
+	// nil keeps the legacy local dist directory behavior.
+	Artifacts *artifact.Store
 	// Competitors are the 参赛者 for 竞赛 (Competition) mode; defaults to
 	// the members of the fallback chain (gemma 离线时自动减员).
 	Competitors []provider.Provider
@@ -82,13 +88,14 @@ type Config struct {
 }
 
 type Server struct {
-	store    session.Store
-	cfg      Config
-	bus      eventstream.Bus
-	queue    jobqueue.Queue
-	pipeline *pipeline.Pipeline
-	builder  *builder.Builder
-	payStore *pay.Store
+	store     session.Store
+	cfg       Config
+	artifacts *artifact.Store
+	bus       eventstream.Bus
+	queue     jobqueue.Queue
+	pipeline  *pipeline.Pipeline
+	builder   *builder.Builder
+	payStore  *pay.Store
 
 	// cancel stops the Worker pool and the recovery sweeper; closeOnce makes
 	// Close idempotent.
@@ -122,6 +129,7 @@ func New(cfg Config) *Server {
 	if store == nil {
 		store = session.NewStore(cfg.WorkspaceDir)
 	}
+	artifacts := cfg.Artifacts
 	bus := cfg.Bus
 	if bus == nil {
 		bus = eventstream.NewMemoryBus()
@@ -161,8 +169,10 @@ func New(cfg Config) *Server {
 			Bus:       bus,
 			Prov:      prov,
 			Builder:   build,
+			Artifacts: artifacts,
 			StepDelay: 120 * time.Millisecond,
 		},
+		artifacts:     artifacts,
 		builder:       build,
 		leaseTTL:      leaseTTL,
 		sweepInterval: sweepInterval,
@@ -507,6 +517,10 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if s.artifacts != nil {
+		s.handleArtifactApp(w, r, id)
+		return
+	}
 	ws, err := s.workspaceDir(owner, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not found")
@@ -550,15 +564,92 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, full)
 }
 
+// handleArtifactApp serves the same public /app surface from the shared
+// artifact store. The current pointer is resolved per request, so a build
+// activated by one replica is immediately visible on every other replica.
+func (s *Server) handleArtifactApp(w http.ResponseWriter, r *http.Request, id string) {
+	prefix := artifact.SessionPrefix(id)
+	rel := r.PathValue("path")
+	if rest, found := strings.CutPrefix(rel, "contest/"); found {
+		prov, sub, ok := strings.Cut(rest, "/")
+		if !ok || !validProviderSegment(prov) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		prefix = artifact.ContestPrefix(id, prov)
+		rel = sub
+	}
+	rel, ok := cleanArtifactPath(rel)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	obj, buildID, err := s.artifacts.Open(r.Context(), prefix, rel)
+	if err != nil {
+		if errors.Is(err, artifact.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not built yet")
+			return
+		}
+		slog.Error("open app artifact", "session", id, "path", rel, "err", err)
+		writeError(w, http.StatusBadGateway, "artifact store unavailable")
+		return
+	}
+	defer obj.Body.Close()
+	w.Header().Set("Cache-Control", "no-cache")
+	if rel == "index.html" {
+		body, err := io.ReadAll(obj.Body)
+		if err != nil {
+			slog.Error("read app artifact index", "session", id, "err", err)
+			writeError(w, http.StatusBadGateway, "artifact store unavailable")
+			return
+		}
+		s.servePreviewIndexBody(w, body, "b"+buildID+":")
+		return
+	}
+	if obj.ContentType != "" {
+		w.Header().Set("Content-Type", obj.ContentType)
+	}
+	if obj.Size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
+	}
+	if obj.ETag != "" {
+		w.Header().Set("ETag", obj.ETag)
+	}
+	if !obj.ModTime.IsZero() {
+		w.Header().Set("Last-Modified", obj.ModTime.UTC().Format(http.TimeFormat))
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, obj.Body); err != nil {
+		slog.Warn("stream app artifact", "session", id, "path", rel, "err", err)
+	}
+}
+
+func cleanArtifactPath(rel string) (string, bool) {
+	if rel == "" {
+		return "index.html", true
+	}
+	if strings.Contains(rel, "\\") {
+		return "", false
+	}
+	clean := path.Clean(rel)
+	if clean == "." {
+		return "index.html", true
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
+		return "", false
+	}
+	return clean, true
+}
+
 // servePreviewIndex serves a built app's index.html with a per-build
 // storage namespace injected. Generated apps routinely persist state in
 // localStorage with "stored value wins over defaults" logic; without
 // isolation an early (empty or outdated) write shadows the richer
 // defaults of every later build, and the preview looks "stale" no matter
-// how often it rebuilds. Keying the namespace to the build's mtime gives
-// each rebuild a fresh storage view (new defaults show) while edits made
-// inside one build still survive preview reloads.
-func (s *Server) servePreviewIndex(w http.ResponseWriter, r *http.Request, indexPath string) {
+// how often it rebuilds. Local builds key the namespace to mtime; shared
+// artifacts key it to the immutable build id so every replica injects the
+// same namespace.
+func (s *Server) servePreviewIndex(w http.ResponseWriter, _ *http.Request, indexPath string) {
 	body, err := os.ReadFile(indexPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not built yet")
@@ -569,8 +660,12 @@ func (s *Server) servePreviewIndex(w http.ResponseWriter, r *http.Request, index
 		writeError(w, http.StatusNotFound, "not built yet")
 		return
 	}
-	// Digits only — this string lands verbatim in the injected script.
-	ns := fmt.Sprintf("b%d:", info.ModTime().Unix())
+	s.servePreviewIndexBody(w, body, fmt.Sprintf("b%d:", info.ModTime().Unix()))
+}
+
+func (s *Server) servePreviewIndexBody(w http.ResponseWriter, body []byte, ns string) {
+	// Digits plus the fixed b/colon wrapper — this string lands verbatim in
+	// the injected script.
 	injection := []byte(`<script data-atoms-storage-ns>
 (() => {
   const NS = "` + ns + `";
@@ -853,19 +948,38 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 
 // handleDuplicate deep-copies a session into a fresh one.
 func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.store.Duplicate(s.requestUser(r), r.PathValue("id"))
+	user := s.requestUser(r)
+	id := r.PathValue("id")
+	sess, err := s.store.Duplicate(user, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if s.artifacts != nil {
+		_, err := s.artifacts.CopyTree(r.Context(), artifact.SessionPrefix(id), artifact.SessionPrefix(sess.ID))
+		if err != nil && !errors.Is(err, artifact.ErrNotFound) {
+			_ = s.store.Delete(user, sess.ID)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
 }
 
 // handleDelete removes a session and its public-URL index entry.
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Delete(s.requestUser(r), r.PathValue("id")); err != nil {
+	user := s.requestUser(r)
+	id := r.PathValue("id")
+	if err := s.store.Delete(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if s.artifacts != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.artifacts.DeletePrefix(ctx, artifact.SessionPrefix(id)); err != nil {
+			slog.Warn("delete session artifacts", "session", id, "err", err)
+		}
+		cancel()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -974,7 +1088,15 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 // /app is currently serving. Any failure keeps the old dist, restores the
 // session to "ready", and lands an error on the timeline; success records a
 // version and emits a publish event.
-func (s *Server) runPublish(_ context.Context, user, id string) {
+func (s *Server) runPublish(ctx context.Context, user, id string) {
+	if s.artifacts != nil {
+		s.runPublishArtifacts(ctx, user, id)
+		return
+	}
+	s.runPublishLocal(user, id)
+}
+
+func (s *Server) runPublishLocal(user, id string) {
 	fail := func(msg string) {
 		slog.Error("publish failed", "session", id, "detail", msg)
 		_ = s.store.SetStatus(user, id, "ready")
@@ -1034,6 +1156,75 @@ func (s *Server) runPublish(_ context.Context, user, id string) {
 		return
 	}
 	_ = os.RemoveAll(bakDir)
+	_ = s.store.SetStatus(user, id, "ready")
+	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
+}
+
+// runPublishArtifacts rebuilds into a staged immutable object directory,
+// activates it, and only then records the publish. A record failure restores
+// the previous pointer, preserving the local swap's rollback contract while
+// keeping every replica on the same version.
+func (s *Server) runPublishArtifacts(ctx context.Context, user, id string) {
+	fail := func(msg string) {
+		slog.Error("publish failed", "session", id, "detail", msg)
+		_ = s.store.SetStatus(user, id, "ready")
+		s.pipeline.EmitError(user, id, "发布失败："+msg)
+	}
+	appDir, err := s.appDir(user, id)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	ws, err := s.workspaceDir(user, id)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	tmpDir := filepath.Join(ws, "dist.new")
+	_ = os.RemoveAll(tmpDir)
+	if err := s.builder.Build(appDir, tmpDir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("rebuild failed: " + err.Error())
+		return
+	}
+	prefix := artifact.SessionPrefix(id)
+	previousID, hadPrevious, err := s.artifacts.Current(ctx, prefix)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("read current build: " + err.Error())
+		return
+	}
+	newID, err := s.artifacts.StageTree(ctx, prefix, tmpDir)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("stage new build: " + err.Error())
+		return
+	}
+	if err := s.artifacts.Activate(ctx, prefix, newID); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		fail("activate new build: " + err.Error())
+		return
+	}
+	pub, err := s.store.RecordPublish(user, id, "/app/"+id+"/")
+	if err != nil {
+		// The Job context may already be canceled when the record fails. Use
+		// a fresh bounded context so rollback still has a chance to repair
+		// the shared pointer; otherwise every replica could keep serving the
+		// unrecorded build indefinitely.
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if hadPrevious {
+			if restoreErr := s.artifacts.Activate(rollbackCtx, prefix, previousID); restoreErr != nil {
+				slog.Error("restore previous artifact after record failure", "session", id, "err", restoreErr)
+			}
+		} else if deleteErr := s.artifacts.ClearCurrent(rollbackCtx, prefix); deleteErr != nil {
+			slog.Error("drop unrecorded artifact after record failure", "session", id, "err", deleteErr)
+		}
+		_ = os.RemoveAll(tmpDir)
+		fail(err.Error())
+		return
+	}
+	_ = os.RemoveAll(tmpDir)
 	_ = s.store.SetStatus(user, id, "ready")
 	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
 }

@@ -41,6 +41,12 @@ Emma 产出的结构化产品描述。每个回合结合完整历史重新推导
 **构建器（Builder）**:
 服务端 esbuild 封装，把会话的文件集编成可预览的静态产物（`dist/index.html` + bundle.js）。
 
+**构建产物存储（Artifact Store）**:
+`/app` 构建结果的共享存储边界。未配置 COS 时兼容本地 `dist`；配置后每次成功构建写为
+不可变 `builds/<buildID>/...`，`current.json` 原子指向活动版本。发布先 stage 再 activate，
+最后记录 Publish，记录失败恢复旧指针；竞赛归档和胜者复制复用同一存储。COS 解决产物跨
+副本共享，但 app 源码仍在 workspace，跨节点部署需要共享 RWX 源码存储。
+
 **供应商目录（vendor/）**:
 预置的 React ESM 构建，是 esbuild resolve `react`/`react-dom` 的唯一来源，保证构建零网络依赖。
 
@@ -70,7 +76,7 @@ _Avoid_: 假支付、伪支付
 模拟收银台接受的固定假卡号（`4242 4242 4242 4242`），明示交易的模拟性质。
 
 **发布（Publish）**:
-把会话的构建产物开放为固定公网 URL（`/app/<id>/`）并生成二维码与发布记录的动作。
+把会话的构建产物开放为固定公网 URL（`/app/<id>/`）并生成二维码与发布记录的动作。发布记录是版本事实；Artifact Store 的 `current.json` 是对应活动产物指针，二者失败时保持旧版本可见。
 
 ## 部署域
 
