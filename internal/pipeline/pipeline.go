@@ -11,63 +11,23 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
 
-// Broker fans session events out to connected SSE clients.
-// All three methods are safe for concurrent use: Publish runs on pipeline
-// goroutines, Subscribe/Unsubscribe on SSE handler goroutines.
-type Broker struct {
-	mu          sync.RWMutex
-	subscribers map[string]map[chan session.Event]struct{}
-}
-
-func NewBroker() *Broker {
-	return &Broker{subscribers: map[string]map[chan session.Event]struct{}{}}
-}
-
-func (b *Broker) Subscribe(id string) chan session.Event {
-	ch := make(chan session.Event, 16)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.subscribers[id] == nil {
-		b.subscribers[id] = map[chan session.Event]struct{}{}
-	}
-	b.subscribers[id][ch] = struct{}{}
-	return ch
-}
-
-func (b *Broker) Unsubscribe(id string, ch chan session.Event) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.subscribers[id], ch)
-	if len(b.subscribers[id]) == 0 {
-		delete(b.subscribers, id)
-	}
-	close(ch)
-}
-
-func (b *Broker) Publish(id string, ev session.Event) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for ch := range b.subscribers[id] {
-		select {
-		case ch <- ev:
-		default: // slow client: drop, it can resume via ?after=
-		}
-	}
-}
-
 // Pipeline runs one turn for a session.
 type Pipeline struct {
-	Store  session.Store
-	Broker *Broker
-	Prov   provider.Provider
+	Store session.Store
+	// Bus fans appended events out to SSE clients. MemoryBus keeps
+	// single-replica behavior; production wires a FanoutBus over Redis
+	// Streams. A nil Bus only degrades live delivery — every event is
+	// already persisted, so clients still catch up via ?after= replay.
+	Bus  eventstream.Bus
+	Prov provider.Provider
 	// Builder compiles the written files into a previewable dist; nil skips
 	// building (kept optional so provider-only tests stay light).
 	Builder *builder.Builder
@@ -81,7 +41,14 @@ func (p *Pipeline) emit(owner, id string, ev session.Event) {
 		slog.Error("append event", "session", id, "type", ev.Type, "err", err)
 		return
 	}
-	p.Broker.Publish(id, appended)
+	if p.Bus == nil {
+		return
+	}
+	// Postgres already holds the event; Redis fan-out is a hot path, so a
+	// publish failure must never fail or roll back the turn (ADR-0007).
+	if err := p.Bus.Publish(context.Background(), id, appended); err != nil {
+		slog.Warn("publish event", "session", id, "seq", appended.Seq, "err", err)
+	}
 }
 
 // EmitUserMessage puts the user's utterance onto the 事件流 so the

@@ -41,6 +41,8 @@ cd web && npm install && npm run dev
 | `PORT` | `4173` | 后端监听端口 |
 | `WORKSPACE_DIR` | `workspace` | 会话工作区根目录 |
 | `AUTH_MODE` | `dev` | `dev` 免登录（`DEV_USER`），`oidc` 走 AuthSphere |
+| `DATABASE_DSN` | 空 | Postgres DSN（`atoms-middleware` Secret）；留空用文件存储 |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD` | 空 | Redis Streams 实时扇出（ADR-0007）；`REDIS_HOST` 留空退回单进程 MemoryBus，Redis 不可达时降级为 Postgres 重放 |
 | `DEEPSEEK_API_KEY` | 空 | 主生成引擎（留空则降级到本地模型/模板） |
 | `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 官方默认值 | DeepSeek 兼容端点覆写 |
 | `LOCAL_LLM_BASE_URL` | `http://192.168.1.101:8090/v1` | 本地 gemma（llama.cpp OpenAI 兼容） |

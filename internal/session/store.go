@@ -22,6 +22,11 @@ type Store interface {
 	AppendEvent(owner, id string, ev Event) (Event, error)
 	AppendMessage(owner, id string, msg Message) error
 
+	// EventsAfter returns the persisted events with Seq > after, ordered by
+	// seq. It is the SSE reconnect/gap-fill replay path: Redis Streams is
+	// only the hot path, so a missed live event is topped up from here.
+	EventsAfter(owner, id string, after int) ([]Event, error)
+
 	// BeginTurn atomically flips the session to "building"; ok=false
 	// means another turn holds it (the HTTP layer answers 409).
 	BeginTurn(owner, id string) (prev string, ok bool, err error)

@@ -187,6 +187,41 @@ func (p *PGStore) loadStream(sess *Session) error {
 	return mrows.Err()
 }
 
+// EventsAfter replays persisted events with Seq > after for one session.
+// Ownership is verified against the sessions row so a guessed id cannot
+// read another user's timeline; a miss returns pgx.ErrNoRows like Load.
+func (p *PGStore) EventsAfter(owner, id string, after int) ([]Event, error) {
+	var exists bool
+	err := p.pool.QueryRow(context.Background(),
+		`SELECT true FROM sessions WHERE owner = $1 AND id = $2`, owner, id).Scan(&exists)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := p.pool.Query(context.Background(),
+		`SELECT seq, type, agent, payload, at FROM events
+		 WHERE session_id = $1 AND seq > $2 ORDER BY seq`, id, after)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Event{}
+	for rows.Next() {
+		var ev Event
+		var payload []byte
+		if err := rows.Scan(&ev.Seq, &ev.Type, &ev.Agent, &payload, &ev.At); err != nil {
+			return nil, err
+		}
+		if len(payload) > 0 {
+			ev.Payload = map[string]any{}
+			if err := json.Unmarshal(payload, &ev.Payload); err != nil {
+				return nil, fmt.Errorf("decode event payload: %w", err)
+			}
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
 // Save persists the scalar aggregate fields plus the JSONB sub-structures
 // (publishes, contest). Events and messages are append-only and never
 // rewritten here — a full-rewrite Save would clobber concurrent appends.

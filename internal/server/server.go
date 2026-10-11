@@ -18,6 +18,7 @@ import (
 
 	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/pay"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -47,12 +48,24 @@ type Config struct {
 	// ScoreFunc is Nina's scoring brain; defaults to LLM with a
 	// deterministic heuristic fallback.
 	ScoreFunc ScoreFunc
+	// Bus fans events out to SSE clients. nil means an in-process
+	// MemoryBus; production passes a FanoutBus over Redis Streams
+	// (ADR-0007) so multiple replicas share the live hot path.
+	Bus eventstream.Bus
+	// HeartbeatInterval emits an SSE comment line when no event has been
+	// written, keeping proxies from closing an idle connection. Zero uses
+	// the 15s production default; tests shrink it.
+	HeartbeatInterval time.Duration
+	// PollInterval re-reads Postgres for events missed on the Redis hot
+	// path (Redis down or a dropped stream entry). Zero uses 5s; this is
+	// the graceful-degradation fallback required by #17.
+	PollInterval time.Duration
 }
 
 type Server struct {
 	store    session.Store
 	cfg      Config
-	broker   *pipeline.Broker
+	bus      eventstream.Bus
 	pipeline *pipeline.Pipeline
 	builder  *builder.Builder
 	payStore *pay.Store
@@ -69,7 +82,10 @@ func New(cfg Config) *Server {
 	if store == nil {
 		store = session.NewStore(cfg.WorkspaceDir)
 	}
-	broker := pipeline.NewBroker()
+	bus := cfg.Bus
+	if bus == nil {
+		bus = eventstream.NewMemoryBus()
+	}
 	prov := cfg.Prov
 	if prov == nil {
 		prov = provider.ChainFromEnv(context.Background(), cfg.Env)
@@ -78,17 +94,25 @@ func New(cfg Config) *Server {
 	return &Server{
 		store:    store,
 		cfg:      cfg,
-		broker:   broker,
+		bus:      bus,
 		payStore: pay.New(),
 		pipeline: &pipeline.Pipeline{
 			Store:     store,
-			Broker:    broker,
+			Bus:       bus,
 			Prov:      prov,
 			Builder:   build,
 			StepDelay: 120 * time.Millisecond,
 		},
 		builder: build,
 	}
+}
+
+// Close releases the event bus (and its Redis client, when configured).
+func (s *Server) Close() error {
+	if s.bus == nil {
+		return nil
+	}
+	return s.bus.Close()
 }
 
 func (s *Server) Handler() http.Handler {
@@ -769,31 +793,43 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		after = n
 	}
-	sess, err := s.store.Load(user, id)
-	if err != nil {
+	// Existence (and ownership) check before hijacking the response into a
+	// stream: a missing session must be a 404, not an open SSE connection.
+	if _, err := s.store.Load(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	// Subscribe before replaying: events published between the load and the
-	// subscription would otherwise fall into a gap (neither replayed nor
-	// streamed). Seq dedup below collapses any overlap.
-	ch := s.broker.Subscribe(id)
-	defer s.broker.Unsubscribe(id, ch)
+	ctx := r.Context()
+	// Subscribe before replaying: events published between the replay read
+	// and the subscription would otherwise fall into a gap. Seq dedup below
+	// collapses the subscribe/replay overlap.
+	sub, err := s.bus.Subscribe(ctx, id, after)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "event stream unavailable")
+		return
+	}
+	defer sub.Close()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Send the headers right away: an event-free stream (client already
+	// caught up) must not leave the response unsent until the first
+	// heartbeat. This is what turns the handler into a real SSE stream.
+	flusher.Flush()
 
 	maxSeq := after
 	writeEvent := func(ev session.Event) {
+		// Dedup + order guard: replayed and live events may overlap, and a
+		// stale Redis entry must never move the client's cursor backwards.
 		if ev.Seq <= maxSeq {
-			return // already replayed (subscribe-before-load overlap)
+			return
 		}
 		maxSeq = ev.Seq
 		data, _ := json.Marshal(ev)
@@ -801,18 +837,55 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Replay persisted history the client has not seen yet.
-	for _, ev := range sess.Events {
-		writeEvent(ev)
+	// Postgres is the source of truth: replay whatever the client missed
+	// (initial history, a dropped Redis entry, or a whole Redis outage).
+	replay := func() {
+		events, err := s.store.EventsAfter(user, id, maxSeq)
+		if err != nil {
+			slog.Warn("replay events", "session", id, "after", maxSeq, "err", err)
+			return
+		}
+		for _, ev := range events {
+			writeEvent(ev)
+		}
 	}
+	replay()
 
-	// Stream live events until the client goes away.
+	heartbeatEvery := s.cfg.HeartbeatInterval
+	if heartbeatEvery <= 0 {
+		heartbeatEvery = 15 * time.Second
+	}
+	pollEvery := s.cfg.PollInterval
+	if pollEvery <= 0 {
+		pollEvery = 5 * time.Second
+	}
+	heartbeat := time.NewTicker(heartbeatEvery)
+	defer heartbeat.Stop()
+	poll := time.NewTicker(pollEvery)
+	defer poll.Stop()
+
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
-		case ev := <-ch:
+		case ev, ok := <-sub.Events():
+			if !ok {
+				return
+			}
+			// A seq jump means the live path dropped events (slow consumer
+			// or a trimmed Redis Stream): top the hole up from Postgres
+			// before writing the live event that exposed it.
+			if ev.Seq > maxSeq+1 {
+				replay()
+			}
 			writeEvent(ev)
+		case <-poll.C:
+			// Fallback so a client keeps making progress even when the
+			// Redis hot path is down and no live event will ever arrive.
+			replay()
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
 		}
 	}
 }

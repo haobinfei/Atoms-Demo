@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/haobinfei/Atoms-Demo/internal/auth"
+	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/server"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
@@ -41,6 +46,8 @@ func main() {
 		cfg.Store = store
 		storeMode = "postgres"
 	}
+	bus, busMode := newEventBus()
+	cfg.Bus = bus
 	if authMode == "oidc" {
 		mw, err := auth.New(context.Background(), auth.Config{
 			Issuer:          getenv("OIDC_ISSUER", "https://auth.ss-vip.cn"),
@@ -56,9 +63,35 @@ func main() {
 		cfg.Auth = mw
 	}
 	addr := ":" + getenv("PORT", "4173")
-	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=%s, store=%s)",
-		addr, cfg.WorkspaceDir, authMode, storeMode)
-	log.Fatal(http.ListenAndServe(addr, server.New(cfg).Handler()))
+	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=%s, store=%s, bus=%s)",
+		addr, cfg.WorkspaceDir, authMode, storeMode, busMode)
+	srv := server.New(cfg)
+	defer srv.Close()
+	log.Fatal(http.ListenAndServe(addr, srv.Handler()))
+}
+
+// newEventBus wires the SSE fan-out from the atoms-middleware Redis Secret
+// contract (REDIS_HOST/PORT/USERNAME/PASSWORD). Redis is a hot path, not the
+// source of truth (ADR-0007): an empty host keeps the in-process MemoryBus,
+// and an unreachable Redis degrades to it without refusing to start —
+// clients still catch up through Postgres replay.
+func newEventBus() (eventstream.Bus, string) {
+	host := os.Getenv("REDIS_HOST")
+	if host == "" {
+		return nil, "memory"
+	}
+	client := redis.NewClient(&redis.Options{
+		Addr:     net.JoinHostPort(host, getenv("REDIS_PORT", "6379")),
+		Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		log.Printf("redis unavailable (%v); SSE fan-out degrades to Postgres replay", err)
+		return eventstream.NewFanoutBus(client), "redis (degraded)"
+	}
+	return eventstream.NewFanoutBus(client), "redis"
 }
 
 func getenv(key, fallback string) string {

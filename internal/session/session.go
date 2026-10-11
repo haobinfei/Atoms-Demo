@@ -241,6 +241,25 @@ func (s *FileStore) AppendEvent(owner, id string, ev Event) (Event, error) {
 	return ev, nil
 }
 
+// EventsAfter replays persisted events with Seq > after. The whole
+// session.json is already loaded under the store lock, so filtering in
+// memory keeps the returned slice ordered and gapless.
+func (s *FileStore) EventsAfter(owner, id string, after int) ([]Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(owner, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Event, 0, len(sess.Events))
+	for _, ev := range sess.Events {
+		if ev.Seq > after {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
 // AppendMessage persists one user utterance to the session timeline.
 func (s *FileStore) AppendMessage(owner, id string, msg Message) error {
 	s.mu.Lock()
