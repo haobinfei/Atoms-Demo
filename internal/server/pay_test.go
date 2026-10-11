@@ -137,10 +137,14 @@ func TestPayOrdersPersistAcrossRestart(t *testing.T) {
 		`{"card":"4242424242424242"}`)
 
 	// A fresh server process over the same workspace dir.
-	ts2 := httptest.NewServer(server.New(server.Config{
+	srv2 := server.New(server.Config{
 		WorkspaceDir: dir, DevAuth: true, Prov: provider.NewTemplate(),
-	}).Handler())
-	defer ts2.Close()
+	})
+	ts2 := httptest.NewServer(srv2.Handler())
+	defer func() {
+		ts2.Close()
+		_ = srv2.Close()
+	}()
 	code, raw := get(t, ts2.URL+"/api/pay/orders?app="+id)
 	if code != http.StatusOK {
 		t.Fatalf("list after restart status = %d", code)

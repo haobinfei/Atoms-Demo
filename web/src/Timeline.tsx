@@ -11,6 +11,7 @@ const TYPE_LABEL: Record<string, string> = {
   publish: '发布',
   contest: '竞赛',
   done: '完成',
+  recovered: '恢复重跑',
   error: '出错',
   agent: '工作中',
 }

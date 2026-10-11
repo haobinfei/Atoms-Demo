@@ -77,7 +77,10 @@ func stage2Server(t *testing.T, poll time.Duration) (*httptest.Server, session.S
 		PollInterval:      poll,
 	})
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
 	return ts, st, bus
 }
 
@@ -149,7 +152,10 @@ func TestEventsHeartbeatOnIdleStream(t *testing.T) {
 		PollInterval:      time.Hour,
 	})
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
 
 	id := createSession(t, ts.URL, "心跳保活")
 	done := readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", 0, 20)

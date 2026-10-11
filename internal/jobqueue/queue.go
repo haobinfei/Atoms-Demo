@@ -27,6 +27,9 @@ type Job struct {
 	Owner     string `json:"owner"`
 	SessionID string `json:"sessionId"`
 	Kind      Kind   `json:"kind"`
+	// Recover marks a Job re-enqueued by the crash-recovery sweeper; the
+	// Worker emits a 恢复事件 (recovered event) before re-running the work.
+	Recover bool `json:"recover,omitempty"`
 }
 
 // Handler executes one Job. Returning an error leaves the Job

@@ -78,7 +78,10 @@ func newAuthTestServer(t *testing.T) *authEnv {
 	}
 	srv := server.New(server.Config{WorkspaceDir: t.TempDir(), Auth: mw, Prov: provider.NewTemplate()})
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
 	return &authEnv{ts: ts, issuer: issuer, priv: priv}
 }
 

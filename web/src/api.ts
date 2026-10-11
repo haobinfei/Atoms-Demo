@@ -1,6 +1,6 @@
 export interface SessionEvent {
   seq: number
-  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'contest' | 'publish' | 'done' | 'error' | 'agent' | 'message'
+  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'contest' | 'publish' | 'done' | 'error' | 'agent' | 'message' | 'recovered'
   agent?: string
   payload?: Record<string, unknown>
   at: string

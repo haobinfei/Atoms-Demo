@@ -152,6 +152,10 @@ func (s *Server) runContest(ctx context.Context, user, id, prompt string) {
 		s.pipeline.EmitError(user, id, "竞赛初始化失败，请重试")
 		return
 	}
+	// A 崩溃恢复 (crash recovery) re-runs the whole contest: drop any
+	// half-written contest/<provider>/{app,dist} from the crashed attempt so
+	// stale files a contestant no longer emits cannot survive the re-run.
+	_ = os.RemoveAll(filepath.Join(s.store.Workspace(user, id), "contest"))
 	s.pipeline.EmitContestStatus(user, id, "start",
 		fmt.Sprintf("竞赛开始：%s 并行生成中", strings.Join(names, "、")))
 
@@ -300,8 +304,16 @@ func (s *Server) handleWinner(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "provider is required")
 		return
 	}
-	if _, err := s.store.Load(user, id); err != nil {
+	sess, err := s.store.Load(user, id)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// The contest Job may be queued but not yet have called StartContest, so
+	// there is no Contest object yet. It is still a running contest from the
+	// caller's perspective: answer 409 instead of the misleading 404.
+	if sess.Status == "building" && (sess.Kind == "contest" || sess.Contest != nil) {
+		writeError(w, http.StatusConflict, "contest is still running")
 		return
 	}
 	// Claim the winner atomically under the store lock first; a second

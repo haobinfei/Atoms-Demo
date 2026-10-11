@@ -70,6 +70,15 @@ type Config struct {
 	// QueueWorkers is the Worker pool size and thus the LLM concurrency
 	// gate. Zero uses the 3-worker production default.
 	QueueWorkers int
+	// LeaseTTL bounds how long a Worker's 认领租约 (execution lease) blocks
+	// another replica before the sweeper treats the holder as crashed and
+	// re-enqueues. Zero uses the 10-minute production default; tests shrink
+	// it. It must comfortably exceed the longest generation.
+	LeaseTTL time.Duration
+	// SweepInterval is how often the crash-recovery sweeper rescans for
+	// building sessions with no live lease. Zero uses the 30s default; tests
+	// shrink it.
+	SweepInterval time.Duration
 }
 
 type Server struct {
@@ -81,14 +90,25 @@ type Server struct {
 	builder  *builder.Builder
 	payStore *pay.Store
 
-	// cancel stops the Worker pool; closeOnce makes Close idempotent.
+	// cancel stops the Worker pool and the recovery sweeper; closeOnce makes
+	// Close idempotent.
 	cancel    context.CancelFunc
 	closeOnce sync.Once
+	// workers tracks the Worker pool and sweeper goroutines so Close can wait
+	// until no background writer can touch a workspace after it returns.
+	workers sync.WaitGroup
 	// running marks sessions a Worker on this replica is executing right
 	// now, so a duplicate delivery (at-least-once redelivery) never runs two
-	// pipelines on one session at once. Cross-replica exclusion is the lease
-	// work tracked in #21.
+	// pipelines on one session at once. Cross-replica exclusion is the
+	// store-level 认领租约 (execution lease) claimed in handleJob.
 	running sync.Map
+	// leaseTTL bounds an execution lease; sweepInterval is the sweeper tick.
+	leaseTTL      time.Duration
+	sweepInterval time.Duration
+	// leaseHolder identifies this replica as the lease owner (host+pid): two
+	// Workers in one process share it, but the in-process running map already
+	// drops their duplicate, and a different replica has a different holder.
+	leaseHolder string
 }
 
 func New(cfg Config) *Server {
@@ -120,6 +140,15 @@ func New(cfg Config) *Server {
 		queue = jobqueue.NewMemoryQueue(workers * 4)
 	}
 	cfg.Queue = queue
+	leaseTTL := cfg.LeaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = 10 * time.Minute
+	}
+	sweepInterval := cfg.SweepInterval
+	if sweepInterval <= 0 {
+		sweepInterval = 30 * time.Second
+	}
+	host, _ := os.Hostname()
 	build := builder.New()
 	s := &Server{
 		store:    store,
@@ -134,22 +163,28 @@ func New(cfg Config) *Server {
 			Builder:   build,
 			StepDelay: 120 * time.Millisecond,
 		},
-		builder: build,
+		builder:       build,
+		leaseTTL:      leaseTTL,
+		sweepInterval: sweepInterval,
+		leaseHolder:   fmt.Sprintf("%s-%d", host, os.Getpid()),
 	}
-	s.startWorkers(workers)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.startWorkers(ctx, workers)
+	s.startSweeper(ctx)
 	return s
 }
 
 // startWorkers launches the Worker pool: each goroutine is a consumer of the
 // Queue (a Redis consumer-group member, or a reader of the in-process
 // channel). Worker count is the LLM concurrency gate.
-func (s *Server) startWorkers(n int) {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
+func (s *Server) startWorkers(ctx context.Context, n int) {
 	host, _ := os.Hostname()
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("%s-%d-%d", host, os.Getpid(), i)
+		s.workers.Add(1)
 		go func(workerID string) {
+			defer s.workers.Done()
 			if err := s.queue.Run(ctx, workerID, s.handleJob); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Warn("job worker stopped", "worker", workerID, "err", err)
 			}
@@ -161,7 +196,8 @@ func (s *Server) startWorkers(n int) {
 // thread's fast BeginTurn 409. It re-reads the session and only runs work whose
 // status is still "building"; a stale duplicate (the turn already finished, or
 // the status was rolled back) is acknowledged with no side effects. A per-
-// session in-process guard drops a concurrent duplicate of the same session.
+// session in-process guard drops a concurrent duplicate on this replica, and a
+// store-level 认领租约 (execution lease) drops one across replicas.
 func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
 	sess, err := s.store.Load(job.Owner, job.SessionID)
 	if err != nil {
@@ -171,10 +207,35 @@ func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
 	if sess.Status != "building" {
 		return nil
 	}
+	// A stale Job from an earlier turn/contest/publish must not run against a
+	// session that is now building a different kind of work. Legacy sessions
+	// may have no recorded kind; in that case the lease and status still
+	// serialize execution.
+	if sess.Kind != "" && job.Kind != "" && sess.Kind != string(job.Kind) {
+		return nil
+	}
 	if _, running := s.running.LoadOrStore(job.SessionID, struct{}{}); running {
 		return nil
 	}
 	defer s.running.Delete(job.SessionID)
+
+	// Cross-replica claim: at most one executor owns a session at a time. A
+	// lost race (another replica or the sweeper already holds a live lease)
+	// means this delivery is a harmless no-op.
+	ok, err := s.store.ClaimLease(job.Owner, job.SessionID, s.leaseHolder, s.leaseTTL)
+	if err != nil {
+		return err // leave the Job pending; Redis redelivers it
+	}
+	if !ok {
+		return nil
+	}
+	defer func() { _ = s.store.ReleaseLease(job.Owner, job.SessionID, s.leaseHolder) }()
+
+	// Emit the 恢复事件 (recovered event) only after winning the lease, so a
+	// duplicate recovery delivery cannot announce the same recovery twice.
+	if job.Recover {
+		s.pipeline.EmitRecovered(job.Owner, job.SessionID, string(job.Kind))
+	}
 
 	switch job.Kind {
 	case jobqueue.KindTurn:
@@ -187,6 +248,59 @@ func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
 		s.runPublish(ctx, job.Owner, job.SessionID)
 	}
 	return nil
+}
+
+// startSweeper runs the crash-recovery scan once at startup, then on every
+// SweepInterval tick: every building session whose lease is absent or expired
+// (a crashed replica's leftover) is re-enqueued, and the Worker that picks it
+// up re-runs the work from scratch (ADR-0007).
+func (s *Server) startSweeper(ctx context.Context) {
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		s.sweepOnce(ctx)
+		ticker := time.NewTicker(s.sweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.sweepOnce(ctx)
+			}
+		}
+	}()
+}
+
+// sweepOnce re-enqueues every recoverable building session. Claiming a
+// pending lease before the enqueue keeps two replicas (or two ticks) from
+// enqueuing the same recovery twice; a failed enqueue releases it so the next
+// tick retries instead of stranding the session until the lease expires.
+func (s *Server) sweepOnce(ctx context.Context) {
+	refs, err := s.store.ListBuilding()
+	if err != nil {
+		slog.Warn("recovery sweep: list building sessions", "err", err)
+		return
+	}
+	for _, ref := range refs {
+		ok, err := s.store.ClaimLease(ref.Owner, ref.ID, session.LeasePending, s.leaseTTL)
+		if err != nil {
+			slog.Warn("recovery sweep: claim lease", "session", ref.ID, "err", err)
+			continue
+		}
+		if !ok {
+			continue // another replica is already recovering it
+		}
+		kind := jobqueue.Kind(ref.Kind)
+		job := jobqueue.Job{Owner: ref.Owner, SessionID: ref.ID, Kind: kind, Recover: true}
+		if err := s.queue.Enqueue(ctx, job); err != nil {
+			slog.Warn("recovery sweep: enqueue", "session", ref.ID, "kind", kind, "err", err)
+			_ = s.store.ReleaseLease(ref.Owner, ref.ID, session.LeasePending)
+			continue
+		}
+		slog.Info("recovery sweep: re-enqueued building session",
+			"session", ref.ID, "kind", kind)
+	}
 }
 
 // Close stops the Worker pool and releases the event bus (and its Redis
@@ -202,6 +316,7 @@ func (s *Server) Close() error {
 				err = e
 			}
 		}
+		s.workers.Wait()
 		if s.bus != nil {
 			if e := s.bus.Close(); e != nil {
 				err = e
@@ -654,6 +769,13 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 // are fanned out to SSE clients. A full or unavailable Queue is a hard error
 // the HTTP layer surfaces as 503 — the Job is never silently dropped.
 func (s *Server) enqueueJob(user, id string, kind jobqueue.Kind) error {
+	// Record the kind before the Job can run, so crash recovery re-enqueues
+	// the right work. The create path reaches here straight from Create
+	// (which does not know the kind); chat/publish already set it atomically
+	// in BeginTurn, so this is an idempotent re-stamp.
+	if err := s.store.SetJobKind(user, id, string(kind)); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return s.queue.Enqueue(ctx, jobqueue.Job{
@@ -768,7 +890,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// BeginTurn serializes concurrent chat requests atomically; without it
 	// two racing POSTs could both pass a plain status check and interleave
 	// two pipelines on one session.
-	prev, ok, err := s.store.BeginTurn(user, id)
+	prev, ok, err := s.store.BeginTurn(user, id, string(jobqueue.KindTurn))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -813,7 +935,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	// Claim the session atomically: a chat turn starting mid-publish would
 	// otherwise race the rebuild for the same distDir. The session shows
 	// "building" for the duration, which also 409s chat requests.
-	prev, ok, err := s.store.BeginTurn(user, id)
+	prev, ok, err := s.store.BeginTurn(user, id, string(jobqueue.KindPublish))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

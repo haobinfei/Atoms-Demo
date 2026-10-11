@@ -98,6 +98,17 @@ func (p *Pipeline) EmitPublishDone(owner, id string, version int, url string) {
 	}})
 }
 
+// EmitRecovered announces that a crashed 任务 (Job) was picked up by the
+// crash-recovery sweeper and is being re-run from scratch. It is emitted by
+// the Worker, after the execution lease is claimed, so a redelivered or
+// duplicated recovery Job cannot emit it twice.
+func (p *Pipeline) EmitRecovered(owner, id, kind string) {
+	p.emit(owner, id, session.Event{Type: "recovered", Agent: "system", Payload: map[string]any{
+		"kind":   kind,
+		"detail": "实例重启，自动恢复重跑",
+	}})
+}
+
 // EmitContestDone closes the contest: scoring finished, session ready,
 // waiting for the user's winner pick.
 func (p *Pipeline) EmitContestDone(owner, id string) {

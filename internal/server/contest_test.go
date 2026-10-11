@@ -64,7 +64,10 @@ func newContestServer(t *testing.T, competitors []provider.Provider, score serve
 		ScoreFunc:    score,
 	})
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() {
+		ts.Close()
+		_ = srv.Close()
+	})
 	return ts, dir
 }
 

@@ -61,13 +61,13 @@ func TestPGStoreConformance(t *testing.T) {
 	}
 
 	// BeginTurn 语义：首个调用获胜，并发看到 building → ok=false。
-	if _, ok, err := p.BeginTurn(owner, id); ok || err != nil {
+	if _, ok, err := p.BeginTurn(owner, id, "turn"); ok || err != nil {
 		t.Fatalf("BeginTurn on building session: ok=%v err=%v", ok, err)
 	}
 	if err := p.SetStatus(owner, id, "ready"); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
-	prev, ok, err := p.BeginTurn(owner, id)
+	prev, ok, err := p.BeginTurn(owner, id, "turn")
 	if !ok || err != nil || prev != "ready" {
 		t.Fatalf("BeginTurn: prev=%q ok=%v err=%v", prev, ok, err)
 	}

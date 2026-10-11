@@ -30,19 +30,29 @@ type Event struct {
 
 // Session is one "idea → app" workspace (会话).
 type Session struct {
-	ID        string    `json:"id"`
-	Owner     string    `json:"owner"`
-	Name      string    `json:"name"`
-	Category  string    `json:"category"`
-	Pinned    bool      `json:"pinned"`
-	Prompt    string    `json:"prompt"`
-	Status    string    `json:"status"` // building | ready | failed
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	Events    []Event   `json:"events"`
-	Messages  []Message `json:"messages"`
-	Publishes []Publish `json:"publishes"`
-	Contest   *Contest  `json:"contest,omitempty"`
+	ID       string `json:"id"`
+	Owner    string `json:"owner"`
+	Name     string `json:"name"`
+	Category string `json:"category"`
+	Pinned   bool   `json:"pinned"`
+	Prompt   string `json:"prompt"`
+	Status   string `json:"status"` // building | ready | failed
+	// Kind records the in-flight 任务 (Job) kind while Status is "building"
+	// (turn | contest | publish). Crash recovery reads it to re-enqueue the
+	// right work; when empty (a claim that never recorded its kind) the
+	// sweeper infers contest from a running Contest, else falls back to turn.
+	Kind string `json:"kind,omitempty"`
+	// LeaseOwner/LeaseUntil are the 认领租约 (execution lease): LeaseOwner
+	// holds the session until LeaseUntil, so a second Worker (another
+	// replica) or the sweeper must not run it concurrently.
+	LeaseOwner string    `json:"leaseOwner,omitempty"`
+	LeaseUntil time.Time `json:"leaseUntil,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	Events     []Event   `json:"events"`
+	Messages   []Message `json:"messages"`
+	Publishes  []Publish `json:"publishes"`
+	Contest    *Contest  `json:"contest,omitempty"`
 }
 
 // Scores are Nina's three-dimension verdict on one contest version.
@@ -117,14 +127,16 @@ func (s *FileStore) Create(owner, prompt string) (*Session, error) {
 	}
 	now := time.Now()
 	sess := &Session{
-		ID:        id,
-		Owner:     owner,
-		Name:      prompt,
-		Prompt:    prompt,
-		Status:    "building",
-		CreatedAt: now,
-		UpdatedAt: now,
-		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
+		ID:         id,
+		Owner:      owner,
+		Name:       prompt,
+		Prompt:     prompt,
+		Status:     "building",
+		LeaseOwner: LeasePending,
+		LeaseUntil: now.Add(defaultClaimTTL),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Messages:   []Message{{Role: "user", Content: prompt, At: now}},
 		// Events must be a (possibly empty) array, never JSON null: the
 		// workspace reads sess.events.length while the first turn is
 		// still running, and a null would throw before the SSE stream
@@ -279,7 +291,7 @@ func (s *FileStore) AppendMessage(owner, id string, msg Message) error {
 // requests serialize instead of racing two pipelines: the first caller wins,
 // later ones see ok=false and must be rejected. prev is the status to
 // restore with SetStatus if the caller fails after winning.
-func (s *FileStore) BeginTurn(owner, id string) (prev string, ok bool, err error) {
+func (s *FileStore) BeginTurn(owner, id, kind string) (prev string, ok bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.loadLocked(owner, id)
@@ -291,6 +303,12 @@ func (s *FileStore) BeginTurn(owner, id string) (prev string, ok bool, err error
 	}
 	prev = sess.Status
 	sess.Status = "building"
+	// Record the Job kind and a pending lease in the same write as the
+	// status flip, so a crash right after the claim is still recoverable
+	// and the sweeper does not race the enqueue→execute window.
+	sess.Kind = kind
+	sess.LeaseOwner = LeasePending
+	sess.LeaseUntil = time.Now().Add(defaultClaimTTL)
 	if err := s.saveLocked(sess); err != nil {
 		return "", false, err
 	}
@@ -306,7 +324,114 @@ func (s *FileStore) SetStatus(owner, id, status string) error {
 		return err
 	}
 	sess.Status = status
+	if status != "building" {
+		sess.Kind = ""
+		sess.LeaseOwner = ""
+		sess.LeaseUntil = time.Time{}
+	}
 	return s.saveLocked(sess)
+}
+
+// SetJobKind records the in-flight 任务 (Job) kind for crash recovery.
+func (s *FileStore) SetJobKind(owner, id, kind string) error {
+	return s.update(owner, id, func(sess *Session) { sess.Kind = kind })
+}
+
+// ClaimLease takes the execution lease under the store lock. A live lease
+// held by another Worker blocks the claim; a pending lease (BeginTurn or the
+// sweeper) is always takeover-able by a Worker, and an expired lease by
+// anyone.
+func (s *FileStore) ClaimLease(owner, id, holder string, ttl time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(owner, id)
+	if err != nil {
+		return false, err
+	}
+	if sess.Status != "building" {
+		return false, nil
+	}
+	now := time.Now()
+	if sess.LeaseOwner != "" && sess.LeaseUntil.After(now) {
+		// Only a Worker may take over a still-live pending claim.
+		if !(holder != LeasePending && sess.LeaseOwner == LeasePending) {
+			return false, nil
+		}
+	}
+	sess.LeaseOwner = holder
+	sess.LeaseUntil = now.Add(ttl)
+	return true, s.saveLocked(sess)
+}
+
+// ReleaseLease clears the lease when holder still owns it.
+func (s *FileStore) ReleaseLease(owner, id, holder string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(owner, id)
+	if err != nil {
+		return err
+	}
+	if sess.LeaseOwner != holder {
+		return nil
+	}
+	sess.LeaseOwner = ""
+	sess.LeaseUntil = time.Time{}
+	return s.saveLocked(sess)
+}
+
+// ListBuilding returns every building session whose lease is absent or
+// expired, walking the workspace/<owner>/<id>/session.json layout.
+func (s *FileStore) ListBuilding() ([]BuildingRef, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owners, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []BuildingRef{}, nil
+		}
+		return nil, err
+	}
+	now := time.Now()
+	out := []BuildingRef{}
+	for _, ownerEntry := range owners {
+		if !ownerEntry.IsDir() || ownerEntry.Name() == "by-id" {
+			continue
+		}
+		owner := ownerEntry.Name()
+		ids, err := os.ReadDir(filepath.Join(s.dir, owner))
+		if err != nil {
+			continue
+		}
+		for _, idEntry := range ids {
+			if !idEntry.IsDir() {
+				continue
+			}
+			sess, err := s.loadLocked(owner, idEntry.Name())
+			if err != nil {
+				continue // partially written workspace; skip
+			}
+			if sess.Status != "building" {
+				continue
+			}
+			if sess.LeaseOwner != "" && sess.LeaseUntil.After(now) {
+				continue
+			}
+			out = append(out, BuildingRef{Owner: owner, ID: sess.ID, Kind: resolveKind(sess)})
+		}
+	}
+	return out, nil
+}
+
+// resolveKind reports the in-flight Job kind for a building session: the
+// recorded kind when present, otherwise a running contest, else a turn.
+func resolveKind(sess *Session) string {
+	if sess.Kind != "" {
+		return sess.Kind
+	}
+	if sess.Contest != nil && !sess.Contest.Done {
+		return "contest"
+	}
+	return "turn"
 }
 
 // RecordPublish appends one publish entry, assigning the next version
