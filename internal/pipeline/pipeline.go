@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/artifact"
@@ -140,24 +139,7 @@ func effectivePrompt(sess *session.Session, files map[string]string) string {
 	if len(user) <= 1 {
 		return sess.Prompt
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "原始需求：%s\n", user[0])
-	if len(files) > 0 {
-		b.WriteString("\n当前版本文件内容（请在保持整体结构的前提下输出完整的新版本）：")
-		paths := make([]string, 0, len(files))
-		for path := range files {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		for _, path := range paths {
-			fmt.Fprintf(&b, "\n\n--- %s ---\n%s", path, files[path])
-		}
-	}
-	b.WriteString("\n\n请在保持原始需求不变的前提下，按以下迭代要求重新生成完整应用：")
-	for i, u := range user[1:] {
-		fmt.Fprintf(&b, "\n%d. %s", i+1, u)
-	}
-	return b.String()
+	return provider.BuildIterationPrompt(user[0], files, user[1:])
 }
 
 // readAppFiles loads the session's current generated sources (empty on turn

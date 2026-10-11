@@ -113,13 +113,8 @@ func TestChainFromEnvProbesOutUnreachableLocal(t *testing.T) {
 		LocalBaseURL: "http://127.0.0.1:1/v1",
 	})
 	names := provider.Members(chain)
-	for _, n := range names {
-		if n == "gemma-local" {
-			t.Fatalf("unreachable gemma still in chain: %v", names)
-		}
-	}
-	if len(names) == 0 || names[len(names)-1] != "template" {
-		t.Fatalf("template fallback missing: %v", names)
+	if len(names) != 0 {
+		t.Fatalf("unreachable chain should have no providers, got %v", names)
 	}
 }
 
@@ -145,11 +140,19 @@ func TestChainFromEnvIncludesKimiWhenKeyed(t *testing.T) {
 		LocalBaseURL: "http://127.0.0.1:1/v1",
 	})
 	names := provider.Members(chain)
-	if len(names) == 0 || names[0] != "kimi" {
-		t.Fatalf("kimi should head the chain without deepseek: %v", names)
+	if len(names) != 1 || names[0] != "kimi" {
+		t.Fatalf("chain should contain only kimi, got %v", names)
 	}
-	if names[len(names)-1] != "template" {
-		t.Fatalf("template fallback missing: %v", names)
+}
+
+func TestChainFromEnvDoesNotAddTemplateFallback(t *testing.T) {
+	chain := provider.ChainFromEnv(context.Background(), provider.EnvConfig{})
+	if names := provider.Members(chain); len(names) != 0 {
+		t.Fatalf("empty environment should configure no model, got %v", names)
+	}
+	_, err := chain.Generate(context.Background(), "一个个人博客", func(string, string) {})
+	if err == nil || !strings.Contains(err.Error(), "no providers configured") {
+		t.Fatalf("want explicit no-model error, got %v", err)
 	}
 }
 
@@ -209,5 +212,45 @@ func TestAnalyzeExtractsNameAndAccent(t *testing.T) {
 	}
 	if spec.Accent != "#3b82f6" {
 		t.Fatalf("accent = %s", spec.Accent)
+	}
+}
+
+func TestAnalyzeUsesLatestIterationIntent(t *testing.T) {
+	prompt := provider.BuildIterationPrompt(
+		"一个蓝色主题的个人博客",
+		map[string]string{"src/styles.css": "body { color: #3b82f6; }"},
+		[]string{"增加三篇文章", "把主题改成赛博朋克，使用霓虹青色"},
+	)
+	spec := provider.Analyze(prompt)
+	if spec.Category != "site" || spec.SiteKind != "blog" {
+		t.Fatalf("category = %s/%s, want site/blog", spec.Category, spec.SiteKind)
+	}
+	if spec.Accent != "#22d3ee" {
+		t.Fatalf("accent = %s, want cyber cyan #22d3ee", spec.Accent)
+	}
+}
+
+func TestBuildIterationPromptPrioritizesLatestRequest(t *testing.T) {
+	prompt := provider.BuildIterationPrompt(
+		"一个个人博客",
+		map[string]string{"src/App.tsx": "const articles = ['旧文章']"},
+		[]string{"增加三篇文章", "再增加两篇关于 Go 的文章"},
+	)
+	for _, want := range []string{
+		"【原始需求】",
+		"【当前版本文件】",
+		"src/App.tsx",
+		"【历史迭代要求】",
+		"增加三篇文章",
+		"【本轮最新要求｜最高优先级，必须执行】",
+		"再增加两篇关于 Go 的文章",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("iteration prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	latest := strings.LastIndex(prompt, "【本轮最新要求｜最高优先级，必须执行】")
+	if latest < strings.LastIndex(prompt, "【历史迭代要求】") {
+		t.Fatalf("latest request must appear after history:\n%s", prompt)
 	}
 }

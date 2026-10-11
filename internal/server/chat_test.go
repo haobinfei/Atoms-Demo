@@ -1,14 +1,50 @@
 package server_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
+
+type iterationRecordingProvider struct {
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (p *iterationRecordingProvider) Name() string { return "recording" }
+
+func (p *iterationRecordingProvider) Generate(_ context.Context, prompt string, _ func(string, string)) (provider.FileSet, error) {
+	p.mu.Lock()
+	p.prompts = append(p.prompts, prompt)
+	call := len(p.prompts)
+	p.mu.Unlock()
+
+	articles := "旧文章"
+	if call > 1 {
+		articles = "新增文章：Go、Redis、Kubernetes"
+	}
+	return provider.FileSet{
+		"index.html":     "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+		"src/main.tsx":   "import { createRoot } from 'react-dom/client'\nimport App from './App'\ncreateRoot(document.getElementById('root')!).render(<App />)",
+		"src/App.tsx":    "export default function App(){ return <main>" + articles + "</main> }",
+		"src/styles.css": "body { margin: 0; }",
+	}, nil
+}
+
+func (p *iterationRecordingProvider) promptAt(i int) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if i < 0 || i >= len(p.prompts) {
+		return ""
+	}
+	return p.prompts[i]
+}
 
 // TestChatTurnRegeneratesApp drives a first build, then a modification turn,
 // and asserts the full-regeneration contract: user message on the timeline,
@@ -88,6 +124,58 @@ func TestChatTurnRegeneratesApp(t *testing.T) {
 	}
 	if len(userMsgs) != 2 || userMsgs[0] != "一家咖啡店的电商网站" || userMsgs[1] != "把主题改成蓝色" {
 		t.Fatalf("history = %v", userMsgs)
+	}
+}
+
+// A follow-up such as “增加三篇文章” must reach the model with both the
+// current source files and the latest request explicitly marked as the
+// highest-priority instruction. This guards the exact regression where turn
+// one worked but later content changes appeared to be ignored.
+func TestChatIterationIncludesCurrentFilesAndLatestRequest(t *testing.T) {
+	prov := &iterationRecordingProvider{}
+	ts := newTestServerWith(t, prov)
+	id := createSession(t, ts.URL, "生成一个静态个人博客")
+	first := readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", 0, 40)
+
+	const latest = "增加三篇文章，分别写 Go、Redis、Kubernetes"
+	body, _ := json.Marshal(map[string]string{"message": latest})
+	resp, err := http.Post(ts.URL+"/api/sessions/"+id+"/chat", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chat status = %d, want 200", resp.StatusCode)
+	}
+	readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", len(first), 60)
+
+	prompt := prov.promptAt(1)
+	for _, want := range []string{
+		"【原始需求】",
+		"生成一个静态个人博客",
+		"【当前版本文件】",
+		"旧文章",
+		"【本轮最新要求｜最高优先级，必须执行】",
+		latest,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("second-turn prompt missing %q:\n%s", want, prompt)
+		}
+	}
+
+	fileResp, err := http.Get(ts.URL + "/api/sessions/" + id + "/file/src/App.tsx")
+	if err != nil {
+		t.Fatalf("get App.tsx: %v", err)
+	}
+	defer fileResp.Body.Close()
+	var file struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(fileResp.Body).Decode(&file); err != nil {
+		t.Fatalf("decode App.tsx: %v", err)
+	}
+	if !strings.Contains(file.Content, "新增文章：Go、Redis、Kubernetes") {
+		t.Fatalf("second generation did not replace old content: %s", file.Content)
 	}
 }
 

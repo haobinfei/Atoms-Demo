@@ -1,7 +1,8 @@
 // Package provider abstracts the 生成引擎 (Provider): the pluggable backend
 // that turns a user prompt into a FileSet. Implementations: DeepSeekProvider
-// (primary), LocalProvider (local gemma), TemplateProvider (offline
-// fallback), FakeProvider (tests). ADR-0002 records the fallback chain.
+// (primary), KimiProvider, LocalProvider (local gemma), FakeProvider and
+// TemplateProvider (deterministic test fixtures). ADR-0008 records the
+// no-template-fallback policy.
 package provider
 
 import (

@@ -1,6 +1,7 @@
-// Chain implements the ADR-0002 兜底链: providers are tried in order; a
-// provider that errors or fails file validation (after one retry) is
-// skipped and the degradation is announced through the emit callback.
+// Chain tries the configured model providers in order. A provider that
+// errors or fails file validation (after one retry) is skipped and the
+// degradation is announced through the emit callback. There is no template
+// provider at the end; exhausting the chain returns an explicit error.
 package provider
 
 import (
@@ -12,7 +13,7 @@ type Chain struct {
 	Providers []Provider
 }
 
-// Members lists the provider names in fallback order; it works on any
+// Members lists the provider names in chain order; it works on any
 // Provider, not just Chain, so callers can inspect what was built.
 func Members(p Provider) []string {
 	if c, ok := p.(Chain); ok {

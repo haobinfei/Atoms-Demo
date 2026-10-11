@@ -36,7 +36,7 @@ _Avoid_: 项目（见下）
 Emma 产出的结构化产品描述。每个回合结合完整历史重新推导，是全量重生成的输入。
 
 **Provider（生成引擎）**:
-把"用户需求"变成"文件集合"的可插拔后端。三个实现：DeepSeekProvider、LocalProvider（本地 gemma）、TemplateProvider（模板兜底）。
+把"用户需求"变成"文件集合"的可插拔后端。生产实现为 DeepSeekProvider、KimiProvider 和 LocalProvider（本地 gemma），按配置容错；模型全部失败时回合显式失败，不回退到固定模板。TemplateProvider 仅作为测试夹具。
 
 **构建器（Builder）**:
 服务端 esbuild 封装，把会话的文件集编成可预览的静态产物（`dist/index.html` + bundle.js）。

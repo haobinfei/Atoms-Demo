@@ -40,9 +40,9 @@ type Config struct {
 	// run as DevUser without any token check.
 	DevAuth bool
 	DevUser string
-	// Prov overrides the 生成引擎; defaults to the ADR-0002 env chain.
+	// Prov overrides the 生成引擎; defaults to the configured model chain.
 	Prov provider.Provider
-	// Env configures the fallback chain when Prov is nil.
+	// Env configures the model chain when Prov is nil.
 	Env provider.EnvConfig
 	// Store overrides session persistence; nil means FileStore under
 	// WorkspaceDir. Production passes a PGStore via DATABASE_DSN.
@@ -52,7 +52,7 @@ type Config struct {
 	// nil keeps the legacy local dist directory behavior.
 	Artifacts *artifact.Store
 	// Competitors are the 参赛者 for 竞赛 (Competition) mode; defaults to
-	// the members of the fallback chain (gemma 离线时自动减员).
+	// the members of the configured model chain (gemma 离线时自动减员).
 	Competitors []provider.Provider
 	// ScoreFunc is Nina's scoring brain; defaults to LLM with a
 	// deterministic heuristic fallback.
@@ -399,16 +399,15 @@ func (s *Server) requestUser(r *http.Request) string {
 }
 
 // competitors resolves the 参赛者 list: explicit config wins; otherwise
-// the fallback chain's members race each other (a probed-out local LLM
+// the model chain's members race each other (a probed-out local LLM
 // simply never appears — graceful 减员).
 func (s *Server) competitors() []provider.Provider {
 	if len(s.cfg.Competitors) > 0 {
 		return s.cfg.Competitors
 	}
 	if chain, ok := s.pipeline.Prov.(provider.Chain); ok {
-		// Race real 生成引擎 only: the template fallback is a deterministic
-		// offline guarantee, not a model — as a contestant it adds no
-		// information and would pollute an arena-style comparison.
+		// Defensive: if a caller injects the deterministic TemplateProvider
+		// test fixture into a chain, keep it out of model comparisons.
 		real := make([]provider.Provider, 0, len(chain.Providers))
 		for _, p := range chain.Providers {
 			if p.Name() != "template" {
@@ -492,7 +491,7 @@ func safeJoin(root, rel string) (string, error) {
 // (later) the published URL. Publicly accessible, no auth.
 // validProviderSegment reports whether name is safe as a contest
 // archive directory segment. Provider names come from Provider.Name()
-// (e.g. "deepseek", "gemma", "template"); the rules mirror
+// (e.g. "deepseek", "gemma", "kimi"); the rules mirror
 // session.ValidOwner but live here so the two domains stay decoupled.
 func validProviderSegment(name string) bool {
 	if name == "" || len(name) > 64 || strings.Contains(name, "..") {
@@ -794,7 +793,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	_ = zw.Close()
 }
 
-// handleProviders exposes the 兜底链 members so the UI (and operators) can
+// handleProviders exposes the model-chain members so the UI (and operators) can
 // see which 生成引擎 are active — e.g. whether local gemma was probed out.
 func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"providers": provider.Members(s.pipeline.Prov)})
@@ -825,8 +824,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// The dashboard card shows the 品类 (category) the template engine
-	// recognizes; LLM-only providers fall back to the generic bucket.
+	// The dashboard card shows the 品类 (category) recognized by the
+	// deterministic heuristic; unrecognized prompts use the generic bucket.
 	loaded, err := s.store.Load(user, sess.ID)
 	if err == nil {
 		loaded.Category = provider.Analyze(loaded.Prompt).Category

@@ -20,7 +20,9 @@ const systemPrompt = `你是 Atoms Demo 的应用生成引擎。根据用户的�
 4. 应用必须是真实可交互的：使用 useState/useEffect，数据存 localStorage，不许是纯静态占位页。
 5. 界面文案使用中文（除非用户明确要求其他语言）。
 6. 文件数量 4-8 个，代码必须完整，不得截断。
-7. 电商类应用（商品、购物车、下单）必须通过平台注入的 SDK 完成支付闭环：import { createOrder, listOrders } from './atomspay'（注意是相对路径 './atomspay'，不是 'atomspay' 或 'atomspay:atomspay'）；结算时调用 createOrder(商品数组) 并跳转到返回的 checkoutUrl，订单列表用 listOrders() 拉取，并用 consumePaidCallback() 处理支付成功回调。该模块只导出 createOrder / listOrders / consumePaidCallback 三个函数，臆造其他函数名或模块名会直接构建失败。禁止自实现任何支付/卡号输入界面。`
+7. 电商类应用（商品、购物车、下单）必须通过平台注入的 SDK 完成支付闭环：import { createOrder, listOrders } from './atomspay'（注意是相对路径 './atomspay'，不是 'atomspay' 或 'atomspay:atomspay'）；结算时调用 createOrder(商品数组) 并跳转到返回的 checkoutUrl，订单列表用 listOrders() 拉取，并用 consumePaidCallback() 处理支付成功回调。该模块只导出 createOrder / listOrders / consumePaidCallback 三个函数，臆造其他函数名或模块名会直接构建失败。禁止自实现任何支付/卡号输入界面。
+8. 迭代生成时，【本轮最新要求】是最高优先级指令，必须实际落实到代码、样式、文案或交互中；与原始需求或历史要求冲突时，以本轮最新要求为准。
+9. 不得以“保持整体结构”为理由原样返回当前版本；本轮要求涉及的部分必须产生可观察变化，同时输出完整文件集。`
 
 // DeepSeekProvider is the primary 生成引擎 (cloud, fast).
 type DeepSeekProvider struct {
@@ -145,9 +147,11 @@ func (p *KimiProvider) Generate(ctx context.Context, prompt string, emit func(st
 	return files, nil
 }
 
-// ChainFromEnv builds the ADR-0002 fallback chain from configuration:
-// DeepSeek (if a key is set) → local gemma (if reachable at startup) →
-// TemplateProvider (always, offline guarantee).
+// ChainFromEnv builds the configured model chain from the environment:
+// DeepSeek (if a key is set) → Kimi (if a key is set) → local gemma (if
+// reachable at startup). There is deliberately no template fallback: a
+// missing or failed model must surface as an error, not as a misleading
+// successful generation with fixed content.
 func ChainFromEnv(ctx context.Context, cfg EnvConfig) Provider {
 	var chain []Provider
 	if cfg.DeepSeekAPIKey != "" {
@@ -167,7 +171,6 @@ func ChainFromEnv(ctx context.Context, cfg EnvConfig) Provider {
 			slog.Warn("local llm probe failed, skipping", "base_url", cfg.LocalBaseURL, "err", err)
 		}
 	}
-	chain = append(chain, NewTemplate())
 	return Chain{Providers: chain}
 }
 

@@ -45,16 +45,18 @@ cd web && npm install && npm run dev
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD` | 空 | Redis Streams 同时承担实时扇出与任务队列（ADR-0007）。`REDIS_HOST` 留空退回单进程 MemoryBus + 有界 MemoryQueue；配置 Redis 后队列不可用（满/断连）时入队返回 503，**不静默回退内存队列**、不丢任务；事件扇出失败仍降级为 Postgres 重放 |
 | `QUEUE_WORKERS` | `3` | Worker 池大小，也是 LLM 并发闸门；内存队列容量为其 ×4 |
 | `COS_BUCKET` / `COS_ENDPOINT` / `COS_SECRET_ID` / `COS_SECRET_KEY` / `COS_SESSION_TOKEN` | 空 | 构建产物 Artifact Store；全部留空时 `/app` 读本地 `dist`。配置后构建产物写入腾讯 COS，多副本通过不可变 build + `current.json` 指针共享预览/发布。凭据由 `atoms-demo-env` Secret 注入；当前临时 session token 上线前换 CAM 子账号永久密钥 |
-| `DEEPSEEK_API_KEY` | 空 | 主生成引擎（留空则降级到本地模型/模板） |
+| `DEEPSEEK_API_KEY` | 空 | 主生成引擎；未配置且没有其他可用模型时，生成回合显式失败 |
 | `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 官方默认值 | DeepSeek 兼容端点覆写 |
+| `KIMI_API_KEY` / `KIMI_BASE_URL` / `KIMI_MODEL` | 空 / 官方默认值 | Kimi 生成引擎（可选） |
 | `LOCAL_LLM_BASE_URL` | `http://192.168.1.101:8090/v1` | 本地 gemma（llama.cpp OpenAI 兼容） |
 | `LOCAL_LLM_MODEL` | 空 | 本地模型名 |
 | `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | — | AuthSphere 接入（`AUTH_MODE=oidc` 时必填） |
 | `OIDC_REDIRECT_URL` | `http://localhost:4173/api/auth/callback` | 回调地址 |
 | `ATOMS_API`（前端） | `http://localhost:4173` | vite 代理目标 |
 
-生成引擎是三级兜底链：DeepSeek → 本地 gemma → 内置模板（意图识别 + 七类应用
-骨架），任何一级不可用自动降级，绝不卡死。
+生成引擎在已配置的真实模型之间按顺序容错：DeepSeek → Kimi → 本地 gemma。模型全部
+不可用、输出无法解析或文件校验失败时，回合直接标记失败并把错误写入事件流，不再回退
+到固定模板应用。
 
 构建产物存储有两种模式：未配置 COS 时沿用 `workspace/<owner>/<id>/dist`（本地开发与单副本）；配置 COS 后每次成功构建写入不可变对象目录，`current.json` 原子切换活动版本。发布先上传并激活新版本，再写 Postgres 发布记录；记录失败会恢复旧指针。API 多副本的 `/app` 因此不依赖各 Pod 本地 `dist`。
 

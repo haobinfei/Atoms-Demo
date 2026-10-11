@@ -1,6 +1,6 @@
-// TemplateProvider is the offline 兜底 engine: intent recognition over the
-// prompt, then a per-category React template (ADR-0002). It guarantees a
-// buildable, on-topic app with zero network.
+// TemplateProvider is a deterministic test fixture: intent recognition over
+// the prompt, then a per-category React template. It is deliberately not
+// part of the production provider chain (ADR-0008).
 package provider
 
 import (
@@ -20,6 +20,16 @@ func (p *TemplateProvider) Generate(_ context.Context, prompt string, emit func(
 	spec := Analyze(prompt)
 	files := buildApp(spec)
 	return files, nil
+}
+
+type promptIntent struct {
+	category        string
+	siteKind        string
+	name            string
+	hasCategory     bool
+	hasExplicitName bool
+	accent          string
+	hasAccent       bool
 }
 
 // Spec is the recognized intent of a prompt.
@@ -50,6 +60,7 @@ var colorRules = []struct {
 	re  *regexp.Regexp
 	hex string
 }{
+	{regexp.MustCompile(`赛博|cyber|霓虹|neon`), "#22d3ee"},
 	{regexp.MustCompile(`橙|橘|orange`), "#f97316"},
 	{regexp.MustCompile(`蓝|blue`), "#3b82f6"},
 	{regexp.MustCompile(`红|red`), "#ef4444"},
@@ -66,25 +77,88 @@ var nameRE = regexp.MustCompile(`[《「『"“']([^《》「」』"”']{2,16})
 
 // Analyze maps a prompt to the closest template category.
 func Analyze(prompt string) Spec {
+	intentText, latest := promptIntentText(prompt)
+	intent := detectIntent(intentText)
+	if latest != "" {
+		mergeIntent(&intent, detectIntent(latest))
+	}
 	spec := Spec{Category: "site", SiteKind: "landing", Name: "Nexus", Accent: defaultAccent}
-	for _, rule := range categoryRules {
-		if rule.re.MatchString(prompt) {
-			spec.Category = rule.category
-			spec.SiteKind = rule.siteKind
-			spec.Name = rule.name
-			break
-		}
+	if intent.hasCategory {
+		spec.Category = intent.category
+		spec.SiteKind = intent.siteKind
 	}
-	for _, c := range colorRules {
-		if c.re.MatchString(prompt) {
-			spec.Accent = c.hex
-			break
-		}
+	if intent.name != "" {
+		spec.Name = intent.name
 	}
-	if m := nameRE.FindStringSubmatch(prompt); m != nil {
-		spec.Name = m[1]
+	if intent.hasAccent {
+		spec.Accent = intent.accent
 	}
 	return spec
+}
+
+// detectIntent uses the last matching request, not the first rule in the
+// table. That makes “先改成蓝色，再改成红色” resolve to red instead of the
+// stale blue request (and prevents current file contents from winning).
+func detectIntent(text string) promptIntent {
+	var out promptIntent
+	categoryAt := -1
+	for _, rule := range categoryRules {
+		if at := lastMatchIndex(rule.re, text); at > categoryAt {
+			categoryAt = at
+			out.category = rule.category
+			out.siteKind = rule.siteKind
+			out.name = rule.name
+			out.hasCategory = true
+		}
+	}
+	accentAt := -1
+	for _, c := range colorRules {
+		if at := lastMatchIndex(c.re, text); at > accentAt {
+			accentAt = at
+			out.accent = c.hex
+			out.hasAccent = true
+		}
+	}
+	// “赛博朋克 + 霓虹青色” is one visual direction, not two competing
+	// colors. Treat the cyber keyword as the stronger signal so the later
+	// generic “青” rule cannot downgrade the accent to plain teal.
+	if cyberAt := lastMatchIndex(colorRules[0].re, text); cyberAt >= 0 {
+		out.accent = colorRules[0].hex
+		out.hasAccent = true
+	}
+	if matches := nameRE.FindAllStringSubmatchIndex(text, -1); len(matches) > 0 {
+		m := matches[len(matches)-1]
+		out.name = text[m[2]:m[3]]
+		out.hasExplicitName = true
+	}
+	return out
+}
+
+func mergeIntent(base *promptIntent, latest promptIntent) {
+	if latest.hasCategory {
+		base.category = latest.category
+		base.siteKind = latest.siteKind
+		base.hasCategory = true
+		if !base.hasExplicitName {
+			base.name = latest.name
+		}
+	}
+	if latest.hasExplicitName {
+		base.name = latest.name
+		base.hasExplicitName = true
+	}
+	if latest.hasAccent {
+		base.accent = latest.accent
+		base.hasAccent = true
+	}
+}
+
+func lastMatchIndex(re *regexp.Regexp, text string) int {
+	matches := re.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return -1
+	}
+	return matches[len(matches)-1][0]
 }
 
 func buildApp(spec Spec) FileSet {

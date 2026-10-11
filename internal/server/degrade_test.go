@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,10 +12,10 @@ import (
 	"github.com/haobinfei/Atoms-Demo/internal/server"
 )
 
-// When the primary 生成引擎 (a real DeepSeek HTTP call against a dead
-// endpoint) fails, the chain must degrade to the template engine, announce
-// it on the timeline, and still land a working app on disk.
-func TestSessionDegradesToTemplateProvider(t *testing.T) {
+// A model failure must be surfaced instead of being hidden by a template
+// fallback. The turn is marked failed, the error is visible on the timeline,
+// and no stale or synthetic app is written.
+func TestSessionFailsWhenModelGenerationFails(t *testing.T) {
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -27,7 +26,6 @@ func TestSessionDegradesToTemplateProvider(t *testing.T) {
 		DevAuth:      true,
 		Prov: provider.Chain{Providers: []provider.Provider{
 			provider.NewDeepSeek(dead.URL+"/v1", "key", "m"),
-			provider.NewTemplate(),
 		}},
 	})
 	ts := httptest.NewServer(srv.Handler())
@@ -49,23 +47,35 @@ func TestSessionDegradesToTemplateProvider(t *testing.T) {
 	resp.Body.Close()
 
 	events := readSSEUntilDone(t, ts.URL+"/api/sessions/"+out.SessionID+"/events", 0, 40)
-	var sawDegrade bool
+	var sawError bool
 	for _, ev := range events {
-		if ev.Type == "agent" && ev.Agent == "mike" {
-			sawDegrade = true
+		if ev.Type == "error" {
+			message, _ := ev.Payload["message"].(string)
+			if strings.Contains(message, "status 500") {
+				sawError = true
+			}
 		}
 	}
-	if !sawDegrade {
-		t.Fatalf("degradation not announced on timeline: %+v", events)
+	if !sawError {
+		t.Fatalf("model error not announced on timeline: %+v", events)
 	}
 
-	app := filepath.Join(dir, "dev-user", out.SessionID, "app", "src", "App.tsx")
-	data, err := os.ReadFile(app)
+	get, err := http.Get(ts.URL + "/api/sessions/" + out.SessionID)
 	if err != nil {
-		t.Fatalf("template files not written: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if !strings.Contains(string(data), "购物车") {
-		t.Fatal("ecommerce template content missing")
+	defer get.Body.Close()
+	var sess struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(get.Body).Decode(&sess); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if sess.Status != "failed" {
+		t.Fatalf("session status = %q, want failed", sess.Status)
+	}
+	if _, err := os.Stat(dir + "/dev-user/" + out.SessionID + "/app/src/App.tsx"); !os.IsNotExist(err) {
+		t.Fatalf("fallback app should not be written, stat err = %v", err)
 	}
 }
 
