@@ -179,8 +179,12 @@ func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
 	switch job.Kind {
 	case jobqueue.KindTurn:
 		s.pipeline.Run(ctx, job.Owner, job.SessionID)
-	case jobqueue.KindContest, jobqueue.KindPublish:
-		// Not migrated onto the Queue yet (#19/#20); a Job that arrives is
+	case jobqueue.KindContest:
+		// A whole 竞赛 (contest) is one Job: contestants still fan out in
+		// parallel inside, so a single Worker never serializes them.
+		s.runContest(ctx, job.Owner, job.SessionID, sess.Prompt)
+	case jobqueue.KindPublish:
+		// Not migrated onto the Queue yet (#20); a Job that arrives is
 		// acknowledged without side effects rather than run inline.
 	}
 	return nil
@@ -621,13 +625,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			sess = loaded
 		}
 	}
+	kind := jobqueue.KindTurn
 	if req.Competition {
-		go s.runContest(user, sess.ID, sess.Prompt)
-	} else if err := s.enqueueTurn(user, sess.ID); err != nil {
+		kind = jobqueue.KindContest
+	}
+	if err := s.enqueueJob(user, sess.ID, kind); err != nil {
 		// The Queue is full or Redis is unreachable: surface 503 and mark the
 		// session failed rather than silently running a bare goroutine or
 		// dropping the turn (ADR-0007).
-		slog.Error("enqueue create turn", "session", sess.ID, "err", err)
+		slog.Error("enqueue create job", "session", sess.ID, "kind", kind, "err", err)
 		_ = s.store.SetStatus(user, sess.ID, "failed")
 		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
 		return
@@ -644,17 +650,17 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sess)
 }
 
-// enqueueTurn puts a 回合 (Turn) Job on the Queue. The pipeline then runs on a
-// Worker, not a bare goroutine (ADR-0007); events land in the session's event
-// log and are fanned out to SSE clients. A full or unavailable Queue is a hard
-// error the HTTP layer surfaces as 503 — the Job is never silently dropped.
-func (s *Server) enqueueTurn(user, id string) error {
+// enqueueJob puts a 任务 (Job) on the Queue. The work then runs on a Worker,
+// not a bare goroutine (ADR-0007); events land in the session's event log and
+// are fanned out to SSE clients. A full or unavailable Queue is a hard error
+// the HTTP layer surfaces as 503 — the Job is never silently dropped.
+func (s *Server) enqueueJob(user, id string, kind jobqueue.Kind) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return s.queue.Enqueue(ctx, jobqueue.Job{
 		Owner:     user,
 		SessionID: id,
-		Kind:      jobqueue.KindTurn,
+		Kind:      kind,
 	})
 }
 
@@ -781,7 +787,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pipeline.EmitUserMessage(user, id, msg)
-	if err := s.enqueueTurn(user, id); err != nil {
+	if err := s.enqueueJob(user, id, jobqueue.KindTurn); err != nil {
 		// Queue full / Redis down: roll the session back so the next request is
 		// not rejected forever, and surface 503. The user message stays on the
 		// timeline (it was persisted before the enqueue); a retry appends the

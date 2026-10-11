@@ -122,10 +122,11 @@ func clampScore(n int) int {
 	return n
 }
 
-// runContest executes one competition asynchronously: one goroutine per
-// contestant, then Nina scores all ready versions, then the session turns
-// ready and the user picks a winner.
-func (s *Server) runContest(user, id, prompt string) {
+// runContest executes one competition: one goroutine per contestant (so the
+// whole contest is a single Queue Job whose internal fan-out is not throttled
+// by the Worker count), then Nina scores all ready versions, then the session
+// turns ready and the user picks a winner.
+func (s *Server) runContest(ctx context.Context, user, id, prompt string) {
 	competitors := s.competitors()
 	// Assign each contestant a unique entry name: two same-named
 	// providers (possible via Config.Competitors) would otherwise race
@@ -160,17 +161,17 @@ func (s *Server) runContest(user, id, prompt string) {
 		name := assigned[i]
 		go func(comp provider.Provider, name string) {
 			defer wg.Done()
-			s.runContestant(user, id, prompt, comp, name)
+			s.runContestant(ctx, user, id, prompt, comp, name)
 		}(c, name)
 	}
 	wg.Wait()
 
-	s.scoreContest(user, id, prompt)
+	s.scoreContest(ctx, user, id, prompt)
 }
 
 // runContestant drives one 参赛者: generate → validate → write → build,
 // all under contest/<provider>/ so versions stay independent.
-func (s *Server) runContestant(user, id, prompt string, comp provider.Provider, name string) {
+func (s *Server) runContestant(ctx context.Context, user, id, prompt string, comp provider.Provider, name string) {
 	ws := s.store.Workspace(user, id)
 	appDir := filepath.Join(ws, "contest", name, "app")
 	distDir := filepath.Join(ws, "contest", name, "dist")
@@ -182,7 +183,7 @@ func (s *Server) runContestant(user, id, prompt string, comp provider.Provider, 
 		s.pipeline.EmitContestStatus(user, id, "failed", fmt.Sprintf("%s 生成失败：%s", name, err.Error()))
 	}
 
-	files, err := comp.Generate(context.Background(), prompt, func(string, string) {})
+	files, err := comp.Generate(ctx, prompt, func(string, string) {})
 	if err != nil {
 		fail(err)
 		return
@@ -207,7 +208,7 @@ func (s *Server) runContestant(user, id, prompt string, comp provider.Provider, 
 
 // scoreContest is Nina's judging pass over every ready version; graceful
 // degradation means a contest with zero ready versions still finishes.
-func (s *Server) scoreContest(user, id, prompt string) {
+func (s *Server) scoreContest(ctx context.Context, user, id, prompt string) {
 	sess, err := s.store.Load(user, id)
 	if err != nil {
 		slog.Error("load session for scoring", "session", id, "err", err)
@@ -226,7 +227,7 @@ func (s *Server) scoreContest(user, id, prompt string) {
 			slog.Error("read contestant files for scoring", "session", id, "provider", entry.Provider, "err", err)
 			continue
 		}
-		scores, comment, err := s.scoreFunc()(context.Background(), prompt, files)
+		scores, comment, err := s.scoreFunc()(ctx, prompt, files)
 		if err != nil {
 			slog.Error("nina scoring", "session", id, "provider", entry.Provider, "err", err)
 			continue
