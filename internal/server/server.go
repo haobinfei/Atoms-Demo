@@ -6,6 +6,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,11 +15,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
+	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
 	"github.com/haobinfei/Atoms-Demo/internal/pay"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -60,15 +63,32 @@ type Config struct {
 	// path (Redis down or a dropped stream entry). Zero uses 5s; this is
 	// the graceful-degradation fallback required by #17.
 	PollInterval time.Duration
+	// Queue is the 队列 (Queue) that turn/contest/publish 任务 (Job) enter.
+	// nil means an in-process MemoryQueue sized QueueWorkers×4; production
+	// passes a RedisQueue so Workers span replicas (ADR-0007).
+	Queue jobqueue.Queue
+	// QueueWorkers is the Worker pool size and thus the LLM concurrency
+	// gate. Zero uses the 3-worker production default.
+	QueueWorkers int
 }
 
 type Server struct {
 	store    session.Store
 	cfg      Config
 	bus      eventstream.Bus
+	queue    jobqueue.Queue
 	pipeline *pipeline.Pipeline
 	builder  *builder.Builder
 	payStore *pay.Store
+
+	// cancel stops the Worker pool; closeOnce makes Close idempotent.
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	// running marks sessions a Worker on this replica is executing right
+	// now, so a duplicate delivery (at-least-once redelivery) never runs two
+	// pipelines on one session at once. Cross-replica exclusion is the lease
+	// work tracked in #21.
+	running sync.Map
 }
 
 func New(cfg Config) *Server {
@@ -90,11 +110,22 @@ func New(cfg Config) *Server {
 	if prov == nil {
 		prov = provider.ChainFromEnv(context.Background(), cfg.Env)
 	}
+	workers := cfg.QueueWorkers
+	if workers <= 0 {
+		workers = 3
+	}
+	cfg.QueueWorkers = workers
+	queue := cfg.Queue
+	if queue == nil {
+		queue = jobqueue.NewMemoryQueue(workers * 4)
+	}
+	cfg.Queue = queue
 	build := builder.New()
-	return &Server{
+	s := &Server{
 		store:    store,
 		cfg:      cfg,
 		bus:      bus,
+		queue:    queue,
 		payStore: pay.New(),
 		pipeline: &pipeline.Pipeline{
 			Store:     store,
@@ -105,14 +136,76 @@ func New(cfg Config) *Server {
 		},
 		builder: build,
 	}
+	s.startWorkers(workers)
+	return s
 }
 
-// Close releases the event bus (and its Redis client, when configured).
-func (s *Server) Close() error {
-	if s.bus == nil {
+// startWorkers launches the Worker pool: each goroutine is a consumer of the
+// Queue (a Redis consumer-group member, or a reader of the in-process
+// channel). Worker count is the LLM concurrency gate.
+func (s *Server) startWorkers(n int) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	host, _ := os.Hostname()
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("%s-%d-%d", host, os.Getpid(), i)
+		go func(workerID string) {
+			if err := s.queue.Run(ctx, workerID, s.handleJob); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("job worker stopped", "worker", workerID, "err", err)
+			}
+		}(id)
+	}
+}
+
+// handleJob is the Worker-side claim: the correctness backstop behind the HTTP
+// thread's fast BeginTurn 409. It re-reads the session and only runs work whose
+// status is still "building"; a stale duplicate (the turn already finished, or
+// the status was rolled back) is acknowledged with no side effects. A per-
+// session in-process guard drops a concurrent duplicate of the same session.
+func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
+	sess, err := s.store.Load(job.Owner, job.SessionID)
+	if err != nil {
+		// Session deleted while the Job was queued: nothing to do.
 		return nil
 	}
-	return s.bus.Close()
+	if sess.Status != "building" {
+		return nil
+	}
+	if _, running := s.running.LoadOrStore(job.SessionID, struct{}{}); running {
+		return nil
+	}
+	defer s.running.Delete(job.SessionID)
+
+	switch job.Kind {
+	case jobqueue.KindTurn:
+		s.pipeline.Run(ctx, job.Owner, job.SessionID)
+	case jobqueue.KindContest, jobqueue.KindPublish:
+		// Not migrated onto the Queue yet (#19/#20); a Job that arrives is
+		// acknowledged without side effects rather than run inline.
+	}
+	return nil
+}
+
+// Close stops the Worker pool and releases the event bus (and its Redis
+// client, when configured). It is safe to call more than once.
+func (s *Server) Close() error {
+	var err error
+	s.closeOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.queue != nil {
+			if e := s.queue.Close(); e != nil {
+				err = e
+			}
+		}
+		if s.bus != nil {
+			if e := s.bus.Close(); e != nil {
+				err = e
+			}
+		}
+	})
+	return err
 }
 
 func (s *Server) Handler() http.Handler {
@@ -530,10 +623,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Competition {
 		go s.runContest(user, sess.ID, sess.Prompt)
-	} else {
-		// The pipeline runs asynchronously and streams events into the
-		// session's event log; see handleEvents.
-		s.runPipeline(user, sess.ID)
+	} else if err := s.enqueueTurn(user, sess.ID); err != nil {
+		// The Queue is full or Redis is unreachable: surface 503 and mark the
+		// session failed rather than silently running a bare goroutine or
+		// dropping the turn (ADR-0007).
+		slog.Error("enqueue create turn", "session", sess.ID, "err", err)
+		_ = s.store.SetStatus(user, sess.ID, "failed")
+		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
 }
@@ -547,10 +644,18 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sess)
 }
 
-// runPipeline executes the agent pipeline for the session asynchronously;
-// events land in the session's event log and are fanned out to SSE clients.
-func (s *Server) runPipeline(user, id string) {
-	go s.pipeline.Run(context.Background(), user, id)
+// enqueueTurn puts a 回合 (Turn) Job on the Queue. The pipeline then runs on a
+// Worker, not a bare goroutine (ADR-0007); events land in the session's event
+// log and are fanned out to SSE clients. A full or unavailable Queue is a hard
+// error the HTTP layer surfaces as 503 — the Job is never silently dropped.
+func (s *Server) enqueueTurn(user, id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return s.queue.Enqueue(ctx, jobqueue.Job{
+		Owner:     user,
+		SessionID: id,
+		Kind:      jobqueue.KindTurn,
+	})
 }
 
 // handleListSessions returns the current user's sessions for the dashboard:
@@ -676,7 +781,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pipeline.EmitUserMessage(user, id, msg)
-	s.runPipeline(user, id)
+	if err := s.enqueueTurn(user, id); err != nil {
+		// Queue full / Redis down: roll the session back so the next request is
+		// not rejected forever, and surface 503. The user message stays on the
+		// timeline (it was persisted before the enqueue); a retry appends the
+		// follow-up again, the documented at-least-once tradeoff.
+		slog.Error("enqueue chat turn", "session", id, "err", err)
+		_ = s.store.SetStatus(user, id, prev)
+		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
 }
 

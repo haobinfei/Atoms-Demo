@@ -42,7 +42,8 @@ cd web && npm install && npm run dev
 | `WORKSPACE_DIR` | `workspace` | 会话工作区根目录 |
 | `AUTH_MODE` | `dev` | `dev` 免登录（`DEV_USER`），`oidc` 走 AuthSphere |
 | `DATABASE_DSN` | 空 | Postgres DSN（`atoms-middleware` Secret）；留空用文件存储 |
-| `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD` | 空 | Redis Streams 实时扇出（ADR-0007）；`REDIS_HOST` 留空退回单进程 MemoryBus，Redis 不可达时降级为 Postgres 重放 |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD` | 空 | Redis Streams 同时承担实时扇出与任务队列（ADR-0007）。`REDIS_HOST` 留空退回单进程 MemoryBus + 有界 MemoryQueue；配置 Redis 后队列不可用（满/断连）时入队返回 503，**不静默回退内存队列**、不丢任务；事件扇出失败仍降级为 Postgres 重放 |
+| `QUEUE_WORKERS` | `3` | Worker 池大小，也是 LLM 并发闸门；内存队列容量为其 ×4 |
 | `DEEPSEEK_API_KEY` | 空 | 主生成引擎（留空则降级到本地模型/模板） |
 | `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 官方默认值 | DeepSeek 兼容端点覆写 |
 | `LOCAL_LLM_BASE_URL` | `http://192.168.1.101:8090/v1` | 本地 gemma（llama.cpp OpenAI 兼容） |
