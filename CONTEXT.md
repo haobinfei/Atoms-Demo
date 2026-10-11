@@ -44,6 +44,19 @@ Emma 产出的结构化产品描述。每个回合结合完整历史重新推导
 **供应商目录（vendor/）**:
 预置的 React ESM 构建，是 esbuild resolve `react`/`react-dom` 的唯一来源，保证构建零网络依赖。
 
+**任务（Job）**:
+一次「会话独占执行」的最小调度单位，粒度与 BeginTurn 的认领语义一一对应。三种：回合（turn，首建与后续 chat 共用）、竞赛（contest，整场一个 job，内部多参赛者并行）、发布（publish）。Job 只携带 `{属主, 会话ID, 种类}` 指针，全部上下文从会话存储现取——同一指针重复消费天然幂等。
+_Avoid_: 任务（指 Job 时请说「任务」，勿与「回合」混用；回合是领域过程，任务是调度对象）
+
+**队列（Queue）**:
+任务的入口缓冲，有界（容量 = Worker 数 ×4），满了拒绝入队（调用方收到 503）而不是无限排队。接口形态（Enqueue/Start）为 Stage 2 外置队列（NATS/Redis）预留，进程内 channel 只是当前实现。
+
+**Worker**:
+队列的消费者——同进程内的有界 goroutine 池（默认 3，QUEUE_WORKERS 可调）。Worker 数即 LLM 并发闸门。消费任务前必须再次原子认领会话（status CAS），认不上则丢弃该任务——与 HTTP 线程的 BeginTurn 构成「快速 409 + 正确性兜底」双层防线，交付语义 at-least-once。
+
+**崩溃恢复（Recovery）**:
+服务启动时扫描所有处于 building 状态的会话重新入队的机制。竞赛半成品整场重跑（覆盖半成品目录，语义干净）；重跑前追加一条恢复事件，不静默重花 LLM 调用。
+
 ## 业务域
 
 **竞赛（Competition）**:
