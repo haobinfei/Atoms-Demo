@@ -27,6 +27,5 @@ USER 65532:65532
 EXPOSE 4173
 VOLUME ["/workspace"]
 ENV PORT=4173 \
-    WORKSPACE_DIR=/workspace \
-    AUTH_MODE=dev
+    WORKSPACE_DIR=/workspace
 ENTRYPOINT ["/server"]

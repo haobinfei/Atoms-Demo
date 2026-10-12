@@ -5,32 +5,60 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/haobinfei/Atoms-Demo/internal/artifact"
-	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
+	"github.com/haobinfei/Atoms-Demo/internal/identity"
 	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
+	"github.com/haobinfei/Atoms-Demo/internal/mailer"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/server"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
 
 func main() {
-	authMode := getenv("AUTH_MODE", "dev")
-	if authMode != "dev" && authMode != "oidc" {
-		log.Fatalf("AUTH_MODE must be \"dev\" or \"oidc\", got %q", authMode)
+	dsn := os.Getenv("DATABASE_DSN")
+	if dsn == "" {
+		log.Fatal("DATABASE_DSN is required for identity and session storage")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		log.Fatalf("identity postgres pool: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(context.Background()); err != nil {
+		log.Fatalf("identity postgres ping: %v", err)
+	}
+	ident := identity.New(pool)
+	trustedProxies, err := parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		log.Fatalf("trusted proxy configuration: %v", err)
+	}
+	ident.SetAdminEmails(strings.Split(os.Getenv("PLATFORM_ADMIN_EMAILS"), ","))
+	mailCfg, err := mailer.ConfigFromEnv()
+	if err != nil {
+		log.Fatalf("smtp config: %v", err)
+	}
+	sender, err := mailer.NewSMTP(mailCfg)
+	if err != nil {
+		log.Fatalf("smtp sender: %v", err)
 	}
 	cfg := server.Config{
-		WorkspaceDir: getenv("WORKSPACE_DIR", "workspace"),
-		DevAuth:      authMode == "dev",
-		DevUser:      getenv("DEV_USER", "dev-user"),
-		QueueWorkers: getenvInt("QUEUE_WORKERS", 3),
+		WorkspaceDir:      getenv("WORKSPACE_DIR", "workspace"),
+		Identity:          ident,
+		Mailer:            sender,
+		PublicURL:         getenv("APP_BASE_URL", "http://localhost:4173"),
+		SecureCookies:     os.Getenv("COOKIE_SECURE") != "0",
+		TrustedProxyCIDRs: trustedProxies,
+		QueueWorkers:      getenvInt("QUEUE_WORKERS", 3),
 		Env: provider.EnvConfig{
 			DeepSeekAPIKey:  os.Getenv("DEEPSEEK_API_KEY"),
 			DeepSeekBaseURL: os.Getenv("DEEPSEEK_BASE_URL"),
@@ -42,41 +70,39 @@ func main() {
 			LocalModel:      os.Getenv("LOCAL_LLM_MODEL"),
 		},
 	}
-	storeMode := "file"
-	if dsn := os.Getenv("DATABASE_DSN"); dsn != "" {
-		store, err := session.NewPGStore(cfg.WorkspaceDir, dsn)
-		if err != nil {
-			log.Fatalf("postgres store: %v", err)
-		}
-		cfg.Store = store
-		storeMode = "postgres"
+	store, err := session.NewPGStore(cfg.WorkspaceDir, dsn)
+	if err != nil {
+		log.Fatalf("postgres session store: %v", err)
 	}
+	defer store.Close()
+	cfg.Store = store
 	artifacts, artifactMode := newArtifacts()
 	cfg.Artifacts = artifacts
 	bus, busMode := newEventBus()
 	cfg.Bus = bus
 	queue, queueMode := newJobQueue(cfg.QueueWorkers)
 	cfg.Queue = queue
-	if authMode == "oidc" {
-		mw, err := auth.New(context.Background(), auth.Config{
-			Issuer:          getenv("OIDC_ISSUER", "https://auth.ss-vip.cn"),
-			ClientID:        os.Getenv("OIDC_CLIENT_ID"),
-			ClientSecret:    os.Getenv("OIDC_CLIENT_SECRET"),
-			RedirectURL:     getenv("OIDC_REDIRECT_URL", "http://localhost:4173/api/auth/callback"),
-			InsecureCookies: os.Getenv("OIDC_INSECURE_COOKIES") == "1",
-			SkipIssuerCheck: os.Getenv("OIDC_SKIP_ISSUER_CHECK") == "1",
-		})
-		if err != nil {
-			log.Fatalf("auth middleware: %v", err)
-		}
-		cfg.Auth = mw
-	}
 	addr := ":" + getenv("PORT", "4173")
-	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=%s, store=%s, artifacts=%s, bus=%s, queue=%s, workers=%d)",
-		addr, cfg.WorkspaceDir, authMode, storeMode, artifactMode, busMode, queueMode, cfg.QueueWorkers)
+	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=identity, store=postgres, artifacts=%s, bus=%s, queue=%s, workers=%d)",
+		addr, cfg.WorkspaceDir, artifactMode, busMode, queueMode, cfg.QueueWorkers)
 	srv := server.New(cfg)
 	defer srv.Close()
 	log.Fatal(http.ListenAndServe(addr, srv.Handler()))
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var prefixes []netip.Prefix
+	for _, part := range strings.Split(raw, ",") {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(part))
+		if err != nil {
+			return nil, err
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 // newArtifacts wires the optional COS build-output store. All credentials

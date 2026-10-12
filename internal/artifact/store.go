@@ -70,6 +70,12 @@ func SessionPrefix(id string) string {
 	return "sessions/" + id
 }
 
+// PublishedPrefix contains the last successfully published build. It stays
+// separate from the mutable preview pointer under SessionPrefix.
+func PublishedPrefix(id string) string {
+	return path.Join(SessionPrefix(id), "published")
+}
+
 // ContestPrefix is the object namespace for one contestant's archived build.
 func ContestPrefix(id, provider string) string {
 	return path.Join(SessionPrefix(id), "contest", provider)

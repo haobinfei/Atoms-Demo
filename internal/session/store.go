@@ -70,6 +70,7 @@ type Store interface {
 	ListBuilding() ([]BuildingRef, error)
 
 	RecordPublish(owner, id, url string) (Publish, error)
+	SetPublic(owner, id string, public bool) error
 
 	StartContest(owner, id string, providers []string) error
 	UpdateContestEntry(owner, id, provider string, mutate func(*ContestEntry)) error

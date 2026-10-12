@@ -83,9 +83,10 @@ type Contest struct {
 // Publish is one 发布 (Publish) of the session's built app: a versioned,
 // publicly reachable snapshot of /app/{id}/.
 type Publish struct {
-	Version int       `json:"version"`
-	URL     string    `json:"url"`
-	At      time.Time `json:"at"`
+	Version     int       `json:"version"`
+	URL         string    `json:"url"`
+	At          time.Time `json:"at"`
+	Unpublished bool      `json:"unpublished,omitempty"`
 }
 
 // Message is one user or agent utterance inside the session timeline. The
@@ -449,6 +450,20 @@ func (s *FileStore) RecordPublish(owner, id, url string) (Publish, error) {
 		return Publish{}, err
 	}
 	return pub, nil
+}
+
+func (s *FileStore) SetPublic(owner, id string, public bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(owner, id)
+	if err != nil {
+		return err
+	}
+	if len(sess.Publishes) == 0 {
+		return fmt.Errorf("session has not been published")
+	}
+	sess.Publishes[len(sess.Publishes)-1].Unpublished = !public
+	return s.saveLocked(sess)
 }
 
 // StartContest initializes the contest state with the given 参赛者 names.

@@ -1,17 +1,16 @@
 import { defineConfig, devices } from '@playwright/test'
 
-// The E2E stack is fully self-contained: Playwright boots the real Go
-// server (生成引擎 stubbed to the deterministic template provider by
-// pointing the local-LLM probe at a dead port and leaving the DeepSeek
-// key empty) and a vite preview of the built SPA, then drives a browser
-// through the happy path in both desktop and mobile viewports.
+// Start the isolated Postgres and Mailpit services in e2e/compose.yaml before
+// running Playwright. Playwright boots the Go API with a deterministic template
+// provider and the built SPA.
 const API = 'http://127.0.0.1:4173'
 const WEB = 'http://127.0.0.1:5199'
+const DATABASE_DSN = 'postgres://atoms_e2e:local-e2e-only@127.0.0.1:55432/atoms_e2e?sslmode=disable'
 
 export default defineConfig({
   testDir: '.',
   testMatch: '*.spec.ts',
-  timeout: 90_000,
+  timeout: 180_000,
   workers: 1,
   reporter: [['list']],
   projects: [
@@ -26,18 +25,10 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: 'go run ./cmd/server',
+      command: 'go run ./e2e/server.go',
       cwd: '..',
       env: {
-        PORT: '4173',
-        WORKSPACE_DIR: 'e2e/.workspace',
-        AUTH_MODE: 'dev',
-        DEV_USER: 'e2e-user',
-        LOCAL_LLM_BASE_URL: 'http://127.0.0.1:9/v1',
-        // Force the deterministic stub even if the developer's shell
-        // exports a real key.
-        DEEPSEEK_API_KEY: '',
-        DEEPSEEK_BASE_URL: '',
+        DATABASE_DSN,
       },
       url: API + '/api/health',
       reuseExistingServer: false,

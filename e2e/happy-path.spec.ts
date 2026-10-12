@@ -1,27 +1,21 @@
 import { expect, test } from '@playwright/test'
-
-// Fail fast with a clear message if the server picked up a real LLM key
-// from the developer's shell: the happy path expects the deterministic
-// template stub.
-test.beforeEach(async ({ request }) => {
-  const resp = await request.get('http://127.0.0.1:4173/api/providers')
-  const providers = await resp.json()
-  expect(
-    providers.providers,
-    'E2E needs the template-only provider chain (stub); check DEEPSEEK_API_KEY is unset for the webServer env',
-  ).toEqual(['template'])
-})
+import { registerVerifyAndLogin } from './auth'
 
 // Happy path per ticket #11: prompt → timeline renders → iframe preview
 // non-blank AND interactive → modification turn → preview refreshed.
 // Runs once per project (desktop 1280×800, mobile 390×844).
-test('prompt → timeline → interactive preview → chat turn → refreshed preview', async ({
+test('prompt → interactive preview → chat turn → public app → unpublish', async ({
   page,
+  request,
 }) => {
-  await page.goto('/')
+  await registerVerifyAndLogin(page, request)
+  const providersResponse = await page.context().request.get('http://127.0.0.1:5199/api/providers')
+  expect(providersResponse.ok()).toBe(true)
+  const providers = await providersResponse.json()
+  expect(providers.providers, 'E2E requires the deterministic template provider').toEqual(['template'])
 
   // 输入 prompt 并创建会话。
-  await page.getByPlaceholder('例如：一家咖啡店的电商网站').fill('一家咖啡店的电商网站')
+  await page.locator('.home-composer textarea').fill('一家咖啡店的电商网站')
   await page.getByRole('button', { name: '开始构建' }).click()
 
   // 时间线开始渲染（计划事件出现）。
@@ -67,4 +61,22 @@ test('prompt → timeline → interactive preview → chat turn → refreshed pr
   await expect(page.locator('.tl-item.tl-done').nth(1)).toBeVisible({ timeout: 60_000 })
   expect(await reloaded).toBe(true)
   await expect(frame.getByText('用心挑选的每一款')).toBeVisible()
+
+  await page.getByRole('button', { name: '发布', exact: true }).click()
+  await page.getByRole('button', { name: '发布 v1', exact: true }).click()
+  await expect(page.getByAltText('应用二维码')).toBeVisible()
+  const publicURL = await page.locator('.pub-link').innerText()
+  const guestContext = await page.context().browser()!.newContext({ viewport: page.viewportSize()! })
+  try {
+    const guest = await guestContext.newPage()
+    await guest.goto(publicURL)
+    await expect(guest.getByText('用心挑选的每一款')).toBeVisible()
+    page.once('dialog', (dialog) => void dialog.accept())
+    await page.getByRole('button', { name: '取消公开', exact: true }).click()
+    await expect(page.getByText('当前应用未公开，历史发布链接暂不可访问。')).toBeVisible()
+    const response = await guest.reload()
+    expect(response?.status()).toBe(404)
+  } finally {
+    await guestContext.close()
+  }
 })

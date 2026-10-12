@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -20,10 +21,11 @@ import (
 	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/artifact"
-	"github.com/haobinfei/Atoms-Demo/internal/auth"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
+	"github.com/haobinfei/Atoms-Demo/internal/identity"
 	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
+	"github.com/haobinfei/Atoms-Demo/internal/mailer"
 	"github.com/haobinfei/Atoms-Demo/internal/pay"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -31,13 +33,14 @@ import (
 )
 
 type Config struct {
-	WorkspaceDir string
-	// Auth is the AuthSphere OIDC middleware. When set, every /api/* route
-	// (except /api/auth/*) requires a valid JWT and sessions are isolated
-	// per user; /app/{id}/ stays public via the session store's id index.
-	Auth *auth.Middleware
-	// DevAuth bypasses the AuthSphere gate for local development: requests
-	// run as DevUser without any token check.
+	WorkspaceDir      string
+	Identity          *identity.Service
+	Mailer            mailer.Sender
+	PublicURL         string
+	SecureCookies     bool
+	TrustedProxyCIDRs []netip.Prefix
+	// DevAuth is retained only for legacy in-process tests. The production
+	// entrypoint never enables it; real requests require Identity.
 	DevAuth bool
 	DevUser string
 	// Prov overrides the 生成引擎; defaults to the configured model chain.
@@ -338,9 +341,8 @@ func (s *Server) Close() error {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	if s.cfg.Auth != nil {
-		mux.HandleFunc("GET /api/auth/login", s.cfg.Auth.Login)
-		mux.HandleFunc("GET /api/auth/callback", s.cfg.Auth.Callback)
+	if s.cfg.Identity != nil {
+		s.registerIdentityRoutes(mux)
 	}
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -357,6 +359,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /api/sessions/{id}/winner", s.handleWinner)
 	mux.HandleFunc("POST /api/sessions/{id}/publish", s.handlePublish)
+	mux.HandleFunc("POST /api/sessions/{id}/unpublish", s.handleUnpublish)
 	mux.HandleFunc("GET /api/sessions/{id}/publish", s.handleGetPublishes)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
@@ -364,12 +367,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
 	mux.HandleFunc("POST /api/pay/orders", s.handlePayCreate)
 	mux.HandleFunc("GET /api/pay/orders", s.handlePayList)
+	mux.HandleFunc("GET /api/pay/orders/{id}", s.handlePayGet)
 	mux.HandleFunc("POST /api/pay/orders/{id}/pay", s.handlePayPay)
 	mux.HandleFunc("GET /pay/checkout/{id}", s.handlePayCheckout)
 	mux.HandleFunc("GET /app/{id}/{path...}", s.handleApp)
 	var handler http.Handler = mux
-	if s.cfg.Auth != nil {
-		handler = s.cfg.Auth.Wrap(handler)
+	if s.cfg.Identity != nil {
+		handler = s.identityMiddleware(handler)
 	} else if s.cfg.DevAuth {
 		handler = devUserMiddleware(handler, s.cfg.DevUser)
 	}
@@ -384,15 +388,13 @@ func devUserMiddleware(next http.Handler, user string) http.Handler {
 	})
 }
 
-// devUserKey carries the dev-bypass user; the auth package owns the
-// production key, so this one is server-local.
+// devUserKey carries the legacy test user's identity.
 type devUserKey struct{}
 
-// requestUser returns the authenticated (or dev-bypass) user for the
-// request; "" only for routes that never pass through the middleware.
-func (s *Server) requestUser(r *http.Request) string {
-	if u := auth.UserFrom(r.Context()); u != "" {
-		return u
+// requestWorkspaceID returns the current workspace ID or the legacy test identity.
+func (s *Server) requestWorkspaceID(r *http.Request) string {
+	if p, ok := principalFrom(r); ok {
+		return p.Workspace.ID
 	}
 	v, _ := r.Context().Value(devUserKey{}).(string)
 	return v
@@ -439,10 +441,22 @@ func (s *Server) scoreFunc() ScoreFunc {
 	return DefaultScoreFunc(llm)
 }
 
-// handleMe reports who the current request runs as; the web login gate
-// uses it to decide whether to redirect to AuthSphere.
+// handleMe reports the current account and workspace.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	user := s.requestUser(r)
+	if p, ok := principalFrom(r); ok {
+		workspaces, err := s.cfg.Identity.ListWorkspaces(r.Context(), p.Account.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "workspace lookup failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id": p.Account.ID, "email": p.Account.Email, "verified": p.Account.Verified,
+			"admin":            s.cfg.Identity.IsAdmin(r.Context(), p.Account.ID),
+			"currentWorkspace": p.Workspace.ID, "workspaces": workspaces,
+		})
+		return
+	}
+	user := s.requestWorkspaceID(r)
 	if user == "" {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
@@ -516,8 +530,19 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if s.cfg.Identity != nil && !s.canViewApp(r, owner, id) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	preview := true
+	if s.cfg.Identity != nil {
+		preview = false
+		if p, ok := principalFrom(r); ok && p.Workspace.ID == owner {
+			preview = true
+		}
+	}
 	if s.artifacts != nil {
-		s.handleArtifactApp(w, r, id)
+		s.handleArtifactApp(w, r, id, preview)
 		return
 	}
 	ws, err := s.workspaceDir(owner, id)
@@ -526,6 +551,9 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dist := filepath.Join(ws, "dist")
+	if !preview {
+		dist = filepath.Join(ws, "published")
+	}
 	// Loser versions of a contest live under contest/<provider>/dist and
 	// stay publicly reviewable at /app/{id}/contest/{provider}/.
 	rel := r.PathValue("path")
@@ -566,8 +594,11 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 // handleArtifactApp serves the same public /app surface from the shared
 // artifact store. The current pointer is resolved per request, so a build
 // activated by one replica is immediately visible on every other replica.
-func (s *Server) handleArtifactApp(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleArtifactApp(w http.ResponseWriter, r *http.Request, id string, preview bool) {
 	prefix := artifact.SessionPrefix(id)
+	if !preview {
+		prefix = artifact.PublishedPrefix(id)
+	}
 	rel := r.PathValue("path")
 	if rest, found := strings.CutPrefix(rel, "contest/"); found {
 		prov, sub, ok := strings.Cut(rest, "/")
@@ -695,7 +726,7 @@ func (s *Server) servePreviewIndexBody(w http.ResponseWriter, body []byte, ns st
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
-	appDir, err := s.appDir(s.requestUser(r), r.PathValue("id"))
+	appDir, err := s.appDir(s.requestWorkspaceID(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -731,7 +762,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
-	appDir, err := s.appDir(s.requestUser(r), r.PathValue("id"))
+	appDir, err := s.appDir(s.requestWorkspaceID(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -753,7 +784,7 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	appDir, err := s.appDir(s.requestUser(r), r.PathValue("id"))
+	appDir, err := s.appDir(s.requestWorkspaceID(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -818,7 +849,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	sess, err := s.store.Create(user, strings.TrimSpace(req.Prompt))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -850,7 +881,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.store.Load(s.requestUser(r), r.PathValue("id"))
+	sess, err := s.store.Load(s.requestWorkspaceID(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -883,7 +914,7 @@ func (s *Server) enqueueJob(user, id string, kind jobqueue.Kind) error {
 // name, category, status, pin — optionally filtered by a ?q= search over
 // name and prompt.
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	sessions, err := s.store.List(user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -922,7 +953,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if err := s.store.Rename(s.requestUser(r), r.PathValue("id"), strings.TrimSpace(req.Name)); err != nil {
+	if err := s.store.Rename(s.requestWorkspaceID(r), r.PathValue("id"), strings.TrimSpace(req.Name)); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -938,7 +969,7 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "pinned is required")
 		return
 	}
-	if err := s.store.SetPinned(s.requestUser(r), r.PathValue("id"), req.Pinned); err != nil {
+	if err := s.store.SetPinned(s.requestWorkspaceID(r), r.PathValue("id"), req.Pinned); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -947,7 +978,7 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 
 // handleDuplicate deep-copies a session into a fresh one.
 func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	id := r.PathValue("id")
 	sess, err := s.store.Duplicate(user, id)
 	if err != nil {
@@ -967,7 +998,7 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 
 // handleDelete removes a session and its public-URL index entry.
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	id := r.PathValue("id")
 	if err := s.store.Delete(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -995,7 +1026,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "message is required")
 		return
 	}
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	if _, err := s.store.Load(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -1040,7 +1071,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // keep 404/409/400 behavior identical to the old inline handler.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	if _, err := s.store.Load(user, id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -1082,6 +1113,14 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "publishing"})
 }
 
+func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.SetPublic(s.requestWorkspaceID(r), r.PathValue("id"), false); err != nil {
+		writeError(w, http.StatusNotFound, "published session not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // runPublish is the Worker-side 发布 (Publish) execution: rebuild dist into a
 // side directory and swap, so a failed rebuild never takes down the version
 // /app is currently serving. Any failure keeps the old dist, restores the
@@ -1112,6 +1151,22 @@ func (s *Server) runPublishLocal(user, id string) {
 		return
 	}
 	distDir := filepath.Join(ws, "dist")
+	publishedDir := filepath.Join(ws, "published")
+	hadPublication := false
+	restorePublishedSnapshot := func() {
+		if s.cfg.Identity == nil {
+			return
+		}
+		if err := os.RemoveAll(publishedDir); err != nil {
+			slog.Error("remove failed publication", "session", id, "err", err)
+			return
+		}
+		if hadPublication {
+			if err := os.Rename(publishedDir+".bak", publishedDir); err != nil {
+				slog.Error("restore previous publication", "session", id, "err", err)
+			}
+		}
+	}
 	// Build into a side directory and swap, so a failed rebuild never
 	// takes down the version /app is currently serving. The live-dist
 	// gap is two renames, not a full bundle write.
@@ -1124,9 +1179,38 @@ func (s *Server) runPublishLocal(user, id string) {
 		fail("rebuild failed: " + err.Error())
 		return
 	}
+	if s.cfg.Identity != nil {
+		publishedNew := publishedDir + ".new"
+		publishedBak := publishedDir + ".bak"
+		_ = os.RemoveAll(publishedNew)
+		_ = os.RemoveAll(publishedBak)
+		if err := os.CopyFS(publishedNew, os.DirFS(tmpDir)); err != nil {
+			_ = os.RemoveAll(publishedNew)
+			_ = os.RemoveAll(tmpDir)
+			fail("stage published snapshot: " + err.Error())
+			return
+		}
+		if _, err := os.Stat(publishedDir); err == nil {
+			if err := os.Rename(publishedDir, publishedBak); err != nil {
+				_ = os.RemoveAll(publishedNew)
+				_ = os.RemoveAll(tmpDir)
+				fail("stash previous publication: " + err.Error())
+				return
+			}
+			hadPublication = true
+		}
+		if err := os.Rename(publishedNew, publishedDir); err != nil {
+			restorePublishedSnapshot()
+			_ = os.RemoveAll(publishedNew)
+			_ = os.RemoveAll(tmpDir)
+			fail("activate publication: " + err.Error())
+			return
+		}
+	}
 	swapped := false
 	if _, err := os.Stat(distDir); err == nil {
 		if err := os.Rename(distDir, bakDir); err != nil {
+			restorePublishedSnapshot()
 			_ = os.RemoveAll(tmpDir)
 			fail("stash previous dist: " + err.Error())
 			return
@@ -1134,6 +1218,7 @@ func (s *Server) runPublishLocal(user, id string) {
 		swapped = true
 	}
 	if err := os.Rename(tmpDir, distDir); err != nil {
+		restorePublishedSnapshot()
 		if swapped {
 			_ = os.Rename(bakDir, distDir)
 		}
@@ -1143,6 +1228,7 @@ func (s *Server) runPublishLocal(user, id string) {
 	}
 	pub, err := s.store.RecordPublish(user, id, "/app/"+id+"/")
 	if err != nil {
+		restorePublishedSnapshot()
 		// The new dist has no matching record; never let /app serve an
 		// unrecorded version — put the last recorded one back.
 		_ = os.RemoveAll(distDir)
@@ -1155,6 +1241,9 @@ func (s *Server) runPublishLocal(user, id string) {
 		return
 	}
 	_ = os.RemoveAll(bakDir)
+	if s.cfg.Identity != nil {
+		_ = os.RemoveAll(filepath.Join(ws, "published.bak"))
+	}
 	_ = s.store.SetStatus(user, id, "ready")
 	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
 }
@@ -1204,6 +1293,27 @@ func (s *Server) runPublishArtifacts(ctx context.Context, user, id string) {
 		fail("activate new build: " + err.Error())
 		return
 	}
+	var publishedID string
+	var hadPublished bool
+	if s.cfg.Identity != nil {
+		publishedPrefix := artifact.PublishedPrefix(id)
+		publishedID, hadPublished, err = s.artifacts.Current(ctx, publishedPrefix)
+		if err == nil {
+			_, err = s.artifacts.CopyTree(ctx, prefix, publishedPrefix)
+		}
+		if err != nil {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if hadPrevious {
+				_ = s.artifacts.Activate(rollbackCtx, prefix, previousID)
+			} else {
+				_ = s.artifacts.ClearCurrent(rollbackCtx, prefix)
+			}
+			cancel()
+			_ = os.RemoveAll(tmpDir)
+			fail("activate published snapshot: " + err.Error())
+			return
+		}
+	}
 	pub, err := s.store.RecordPublish(user, id, "/app/"+id+"/")
 	if err != nil {
 		// The Job context may already be canceled when the record fails. Use
@@ -1219,6 +1329,16 @@ func (s *Server) runPublishArtifacts(ctx context.Context, user, id string) {
 		} else if deleteErr := s.artifacts.ClearCurrent(rollbackCtx, prefix); deleteErr != nil {
 			slog.Error("drop unrecorded artifact after record failure", "session", id, "err", deleteErr)
 		}
+		if s.cfg.Identity != nil {
+			publishedPrefix := artifact.PublishedPrefix(id)
+			if hadPublished {
+				if restoreErr := s.artifacts.Activate(rollbackCtx, publishedPrefix, publishedID); restoreErr != nil {
+					slog.Error("restore previous publication after record failure", "session", id, "err", restoreErr)
+				}
+			} else if clearErr := s.artifacts.ClearCurrent(rollbackCtx, publishedPrefix); clearErr != nil {
+				slog.Error("drop unrecorded publication after record failure", "session", id, "err", clearErr)
+			}
+		}
 		_ = os.RemoveAll(tmpDir)
 		fail(err.Error())
 		return
@@ -1230,17 +1350,18 @@ func (s *Server) runPublishArtifacts(ctx context.Context, user, id string) {
 
 // handleGetPublishes returns the full publish history, oldest first.
 func (s *Server) handleGetPublishes(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.store.Load(s.requestUser(r), r.PathValue("id"))
+	sess, err := s.store.Load(s.requestWorkspaceID(r), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"publishes": sess.Publishes})
+	published := len(sess.Publishes) > 0 && !sess.Publishes[len(sess.Publishes)-1].Unpublished
+	writeJSON(w, http.StatusOK, map[string]any{"publishes": sess.Publishes, "published": published})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	after := 0
 	if v := r.URL.Query().Get("after"); v != "" {
 		n, err := strconv.Atoi(v)

@@ -11,11 +11,13 @@ const EXAMPLES = [
 
 export default function Home({
   user,
+  canDelete,
   view,
   onViewChange,
   onCreated,
 }: {
   user: string
+  canDelete: boolean
   view: 'new' | 'projects'
   onViewChange: (view: 'new' | 'projects') => void
   onCreated: (id: string) => void
@@ -50,7 +52,7 @@ export default function Home({
       </nav>
       <div className="home-brand">Atoms Demo</div>
       {view === 'projects' ? (
-        <Dashboard onOpen={onCreated} />
+        <Dashboard onOpen={onCreated} canDelete={canDelete} />
       ) : (
         <>
           <h1 className="home-title">把想法变成可运行的应用</h1>

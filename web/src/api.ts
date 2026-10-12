@@ -69,12 +69,91 @@ export async function getSession(id: string): Promise<Session> {
   return (await resp.json()) as Session
 }
 
-export async function getMe(): Promise<string> {
-  const resp = await fetch('/api/me')
-  if (!resp.ok) throw new Error(`me: ${resp.status}`)
-  const data = (await resp.json()) as { user: string }
-  return data.user
+export interface WorkspaceInfo {
+  id: string
+  name: string
+  kind: 'personal' | 'team'
+  role: 'owner' | 'editor'
 }
+
+export interface Account {
+  id: string
+  email: string
+  verified: boolean
+  admin: boolean
+  currentWorkspace: string
+  workspaces: WorkspaceInfo[]
+}
+
+async function apiRequest<T = void>(path: string, method = 'GET', body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
+  const resp = await fetch(path, {
+    method,
+    headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...extraHeaders },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => null) as { error?: string; message?: string } | null
+    throw new Error(`${resp.status}: ${data?.message || data?.error || resp.statusText}`)
+  }
+  if (resp.status === 204) return undefined as T
+  const raw = await resp.text()
+  return (raw ? JSON.parse(raw) : undefined) as T
+}
+
+export const getMe = () => apiRequest<Account>('/api/me')
+export const register = (email: string, password: string) => apiRequest('/api/auth/register', 'POST', { email, password })
+export const verifyEmail = (token: string) => apiRequest('/api/auth/verify', 'POST', { token })
+export const login = (email: string, password: string) => apiRequest('/api/auth/login', 'POST', { email, password })
+export const logout = () => apiRequest('/api/auth/logout', 'POST')
+export const resendVerification = (email: string) => apiRequest('/api/auth/resend-verification', 'POST', { email })
+export const forgotPassword = (email: string) => apiRequest('/api/auth/forgot-password', 'POST', { email })
+export const resetPassword = (token: string, password: string) => apiRequest('/api/auth/reset-password', 'POST', { token, password })
+export const changePassword = (currentPassword: string, newPassword: string) => apiRequest('/api/auth/change-password', 'POST', { currentPassword, newPassword })
+export const deleteAccount = (email: string) => apiRequest('/api/account', 'DELETE', undefined, { 'X-Confirm-Delete': email })
+
+export const createWorkspace = (name: string) => apiRequest('/api/workspaces', 'POST', { name })
+export const switchWorkspace = (id: string) => apiRequest('/api/workspaces/current', 'POST', { id })
+export const deleteWorkspace = (id: string, name: string) => apiRequest(`/api/workspaces/${encodeURIComponent(id)}`, 'DELETE', undefined, { 'X-Confirm-Delete': name })
+export const leaveWorkspace = (id: string) => apiRequest(`/api/workspaces/${encodeURIComponent(id)}/leave`, 'POST')
+
+export interface Member {
+  accountId: string
+  email: string
+  role: 'owner' | 'editor'
+}
+export interface Invitation {
+  id: string
+  email: string
+  role: 'owner' | 'editor'
+  expiresAt: string
+}
+export const listMembers = (id: string) => apiRequest<{ members: Member[] }>(`/api/workspaces/${encodeURIComponent(id)}/members`)
+export const updateMember = (id: string, accountId: string, role: Member['role']) => apiRequest(`/api/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(accountId)}`, 'PATCH', { role })
+export const removeMember = (id: string, accountId: string) => apiRequest(`/api/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(accountId)}`, 'DELETE')
+export const listInvitations = (id: string) => apiRequest<{ invitations: Invitation[] }>(`/api/workspaces/${encodeURIComponent(id)}/invitations`)
+export const inviteMember = (id: string, email: string, role: Member['role']) => apiRequest(`/api/workspaces/${encodeURIComponent(id)}/invitations`, 'POST', { email, role })
+export const revokeInvitation = (id: string, invitationId: string) => apiRequest(`/api/workspaces/${encodeURIComponent(id)}/invitations/${encodeURIComponent(invitationId)}`, 'DELETE')
+export const acceptInvitation = (token: string) => apiRequest('/api/invitations/accept', 'POST', { token })
+
+export interface AdminAccount {
+  id: string
+  email: string
+  disabled: boolean
+  verified: boolean
+  memberships: { workspaceId: string; workspaceName: string; role: Member['role'] }[]
+}
+export interface AuditEntry {
+  id: string
+  actorId: string
+  action: string
+  target: string
+  reason: string
+  at: string
+}
+export const listAdminAccounts = () => apiRequest<{ accounts: AdminAccount[] }>('/api/admin/accounts')
+export const setAccountDisabled = (id: string, disabled: boolean, reason: string) => apiRequest(`/api/admin/accounts/${encodeURIComponent(id)}`, 'PATCH', { disabled, reason })
+export const rescueWorkspace = (id: string, accountId: string, reason: string) => apiRequest(`/api/admin/workspaces/${encodeURIComponent(id)}/rescue`, 'POST', { accountId, reason })
+export const listAudit = () => apiRequest<{ entries: AuditEntry[] }>('/api/admin/audit')
 
 export interface SessionSummary {
   id: string
@@ -124,14 +203,13 @@ export async function deleteSession(id: string): Promise<void> {
   if (!resp.ok) throw new Error(`delete: ${resp.status}`)
 }
 
-// isAuthError reports whether an API failure was a 401 — the AuthSphere
-// session expired and the browser must go through login again.
+// Session expiry returns the user to the local login screen.
 export function isAuthError(e: unknown): boolean {
   return e instanceof Error && /\b401\b/.test(e.message)
 }
 
 export function redirectToLogin(): void {
-  window.location.href = '/api/auth/login'
+  window.location.href = '/'
 }
 
 export async function chatSession(id: string, message: string): Promise<void> {
@@ -171,6 +249,15 @@ export async function getPublishes(id: string): Promise<Publish[]> {
   const data = (await resp.json()) as { publishes: Publish[] }
   return data.publishes
 }
+
+export async function getPublishState(id: string): Promise<{ publishes: Publish[]; published: boolean }> {
+  const resp = await fetch(`/api/sessions/${id}/publish`)
+  if (!resp.ok) throw new Error(`get publish state: ${resp.status}`)
+  const data = (await resp.json()) as { publishes?: Publish[]; published?: boolean }
+  return { publishes: data.publishes ?? [], published: data.published ?? (data.publishes?.length ?? 0) > 0 }
+}
+
+export const unpublishSession = (id: string) => apiRequest(`/api/sessions/${encodeURIComponent(id)}/unpublish`, 'POST')
 
 export function openEventStream(id: string, after: number): EventSource {
   return new EventSource(`/api/sessions/${id}/events?after=${after}`)

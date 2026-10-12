@@ -423,6 +423,35 @@ func (p *PGStore) RecordPublish(owner, id, url string) (Publish, error) {
 	return pub, tx.Commit(ctx)
 }
 
+func (p *PGStore) SetPublic(owner, id string, public bool) error {
+	ctx := context.Background()
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var raw []byte
+	if err := tx.QueryRow(ctx, `SELECT publishes FROM sessions WHERE owner=$1 AND id=$2 FOR UPDATE`, owner, id).Scan(&raw); err != nil {
+		return err
+	}
+	var pubs []Publish
+	if err := json.Unmarshal(raw, &pubs); err != nil {
+		return err
+	}
+	if len(pubs) == 0 {
+		return fmt.Errorf("session has not been published")
+	}
+	pubs[len(pubs)-1].Unpublished = !public
+	encoded, err := json.Marshal(pubs)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE sessions SET publishes=$3,updated_at=now() WHERE owner=$1 AND id=$2`, owner, id, encoded); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // mutateContest is the shared read-modify-write skeleton for contest state
 // transitions; the session row lock serializes entrants. A session without
 // a contest is a no-op (mirroring FileStore, which silently skips a nil

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { getPublishes, publishSession, type Publish } from './api'
+import { getPublishState, publishSession, unpublishSession, type Publish } from './api'
 
 // PublishPanel is the 发布 (Publish) overlay: QR code for the public
 // /app/{id}/ URL, one-click copy, and the versioned publish history.
@@ -17,18 +17,20 @@ export default function PublishPanel({
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState(false)
   const [publishing, setPublishing] = useState(false)
+  const [published, setPublished] = useState(false)
 
   useEffect(() => {
-    void getPublishes(sessionId)
-      .then((list) => {
+    void getPublishState(sessionId)
+      .then(({ publishes: list, published: isPublished }) => {
         const safe = list ?? []
         setPublishes(safe)
+        setPublished(isPublished)
         if (safe.length > 0) setLatest(safe[safe.length - 1])
       })
       .catch(() => setError(true))
   }, [sessionId])
 
-  const publicURL = latest ? `${window.location.origin}${latest.url}` : ''
+  const publicURL = latest && published ? `${window.location.origin}${latest.url}` : ''
 
   useEffect(() => {
     if (!publicURL) return
@@ -44,6 +46,22 @@ export default function PublishPanel({
       const pub = await publishSession(sessionId)
       setLatest(pub)
       setPublishes((prev) => [...prev, pub])
+      setPublished(true)
+    } catch {
+      setError(true)
+    } finally {
+      setPublishing(false)
+    }
+  }
+
+  async function doUnpublish() {
+    if (!window.confirm('取消公开后，当前分享链接和模拟支付入口将立即停止匿名访问。确定继续？')) return
+    setPublishing(true)
+    setError(false)
+    try {
+      await unpublishSession(sessionId)
+      setPublished(false)
+      setQrDataUrl('')
     } catch {
       setError(true)
     } finally {
@@ -82,7 +100,7 @@ export default function PublishPanel({
           </button>
         </div>
 
-        {qrDataUrl && (
+        {publicURL && qrDataUrl && (
           <div className="pub-qr">
             <img src={qrDataUrl} alt="应用二维码" />
           </div>
@@ -95,12 +113,15 @@ export default function PublishPanel({
           </div>
         )}
 
+        {latest && !published && <p className="pub-unpublished">当前应用未公开，历史发布链接暂不可访问。</p>}
+
         {error && <div className="ws-chat-error">操作失败，请稍后重试</div>}
 
         <div className="pub-actions">
           <button className="pub-primary" disabled={publishing} onClick={() => void doPublish()}>
             {publishing ? '发布中…' : latest ? `再次发布（下一版 v${latest.version + 1}）` : '发布 v1'}
           </button>
+          {published && <button className="pub-unpublish" disabled={publishing} onClick={() => void doUnpublish()}>取消公开</button>}
         </div>
 
         {publishes.length > 0 && (

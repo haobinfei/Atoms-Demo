@@ -318,7 +318,7 @@ func readFileSet(dir string) (provider.FileSet, error) {
 // official app; the losers stay archived under contest/<provider>/.
 func (s *Server) handleWinner(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	user := s.requestUser(r)
+	user := s.requestWorkspaceID(r)
 	var req struct {
 		Provider string `json:"provider"`
 	}

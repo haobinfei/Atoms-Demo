@@ -20,6 +20,7 @@ export type PayOrder = {
   items: PayItem[]
   amount: number
   status: string
+  capability?: string
   cardLast4?: string
   createdAt: string
   paidAt?: string
@@ -40,13 +41,19 @@ export async function createOrder(items: PayItem[]): Promise<{ id: string; check
   })
   if (!resp.ok) throw new Error('下单失败')
   const order = await resp.json()
-  return { id: order.id, checkoutUrl: '/pay/checkout/' + order.id + '?app=' + appId() }
+  return { id: order.id, checkoutUrl: '/pay/checkout/' + order.id + '?app=' + appId() + '&token=' + encodeURIComponent(order.capability) }
 }
 
-// listOrders 拉取本应用的全部订单（服务端持久化，换设备仍可见）。
+// listOrders 仅供工作区成员管理订单；访客通过订单链接查看单笔。
 export async function listOrders(): Promise<PayOrder[]> {
   const resp = await fetch('/api/pay/orders?app=' + encodeURIComponent(appId()))
   if (!resp.ok) return []
+  return resp.json()
+}
+
+export async function getOrder(id: string, capability: string): Promise<PayOrder> {
+  const resp = await fetch('/api/pay/orders/' + encodeURIComponent(id) + '?app=' + encodeURIComponent(appId()) + '&token=' + encodeURIComponent(capability))
+  if (!resp.ok) throw new Error('订单不可用')
   return resp.json()
 }
 
@@ -67,8 +74,9 @@ export function consumePaidCallback(): string | null {
 // 用测试卡支付并返回已支付订单。新代码请优先使用 createOrder 并跳转
 // 收银台（让用户看到收银台页面），本函数仅保证臆造代码可编译可运行。
 export async function simulatePayment(items: PayItem[]): Promise<PayOrder> {
-  const { id } = await createOrder(items)
-  const resp = await fetch('/api/pay/orders/' + id + '/pay?app=' + appId(), {
+  const { id, checkoutUrl } = await createOrder(items)
+  const token = new URL(checkoutUrl, window.location.origin).searchParams.get('token') || ''
+  const resp = await fetch('/api/pay/orders/' + id + '/pay?app=' + appId() + '&token=' + encodeURIComponent(token), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ card: '4242 4242 4242 4242' }),

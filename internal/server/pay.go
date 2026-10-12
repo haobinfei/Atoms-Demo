@@ -1,7 +1,5 @@
-// 模拟收银台 (mock checkout) HTTP surface. The pay API is public on
-// purpose: orders are the generated shop's data, and the acceptance
-// criteria require history to survive a device/browser swap. The session
-// id index locates the workspace without leaking ownership.
+// 模拟收银台 HTTP surface. Published apps may accept public orders, but
+// each visitor needs that order's capability to read or pay it.
 package server
 
 import (
@@ -24,6 +22,52 @@ func (s *Server) payDir(app string) (string, error) {
 	return s.store.Workspace(owner, app), nil
 }
 
+func (s *Server) payAccess(w http.ResponseWriter, r *http.Request, app string, memberOnly bool) (string, bool) {
+	owner, err := s.store.IndexOwner(app)
+	if err != nil {
+		writeError(w, 404, "app not found")
+		return "", false
+	}
+	if s.cfg.Identity != nil {
+		p, member := principalFrom(r)
+		member = member && p.Workspace.ID == owner
+		if memberOnly && !member {
+			writeError(w, 404, "app not found")
+			return "", false
+		}
+		if !member && !s.canViewApp(r, owner, app) {
+			writeError(w, 404, "app not found")
+			return "", false
+		}
+	}
+	return s.store.Workspace(owner, app), true
+}
+
+func (s *Server) payOrderAccess(w http.ResponseWriter, r *http.Request, dir, app, id string) (*pay.Order, bool) {
+	orders, err := s.payStore.List(dir)
+	if err != nil {
+		writeError(w, 500, "order lookup failed")
+		return nil, false
+	}
+	for i := range orders {
+		order := &orders[i]
+		if order.ID == id && order.App == app {
+			if s.cfg.Identity != nil {
+				owner, _ := s.store.IndexOwner(app)
+				p, ok := principalFrom(r)
+				member := ok && p.Workspace.ID == owner
+				if !member && (order.Capability == "" || r.URL.Query().Get("token") != order.Capability) {
+					writeError(w, 404, "order not found")
+					return nil, false
+				}
+			}
+			return order, true
+		}
+	}
+	writeError(w, 404, "order not found")
+	return nil, false
+}
+
 func (s *Server) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		App   string     `json:"app"`
@@ -36,9 +80,8 @@ func (s *Server) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "app and items are required")
 		return
 	}
-	dir, err := s.payDir(req.App)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "app not found")
+	dir, ok := s.payAccess(w, r, req.App, false)
+	if !ok {
 		return
 	}
 	order, err := s.payStore.Create(dir, req.App, req.Items)
@@ -50,9 +93,8 @@ func (s *Server) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePayList(w http.ResponseWriter, r *http.Request) {
-	dir, err := s.payDir(r.URL.Query().Get("app"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "app not found")
+	dir, ok := s.payAccess(w, r, r.URL.Query().Get("app"), s.cfg.Identity != nil)
+	if !ok {
 		return
 	}
 	orders, err := s.payStore.List(dir)
@@ -63,10 +105,26 @@ func (s *Server) handlePayList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, orders)
 }
 
+func (s *Server) handlePayGet(w http.ResponseWriter, r *http.Request) {
+	app := r.URL.Query().Get("app")
+	dir, ok := s.payAccess(w, r, app, false)
+	if !ok {
+		return
+	}
+	order, ok := s.payOrderAccess(w, r, dir, app, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
+}
+
 func (s *Server) handlePayPay(w http.ResponseWriter, r *http.Request) {
-	dir, err := s.payDir(r.URL.Query().Get("app"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "app not found")
+	app := r.URL.Query().Get("app")
+	dir, ok := s.payAccess(w, r, app, false)
+	if !ok {
+		return
+	}
+	if _, ok := s.payOrderAccess(w, r, dir, app, r.PathValue("id")); !ok {
 		return
 	}
 	var req struct {
@@ -101,25 +159,13 @@ func (s *Server) handlePayPay(w http.ResponseWriter, r *http.Request) {
 // and redirects back into the app with ?paid= on success.
 func (s *Server) handlePayCheckout(w http.ResponseWriter, r *http.Request) {
 	app := r.URL.Query().Get("app")
-	dir, err := s.payDir(app)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "app not found")
+	dir, ok := s.payAccess(w, r, app, false)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
-	orders, err := s.payStore.List(dir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	var order *pay.Order
-	for i := range orders {
-		if orders[i].ID == id && orders[i].App == app {
-			order = &orders[i]
-		}
-	}
-	if order == nil {
-		writeError(w, http.StatusNotFound, "order not found")
+	order, ok := s.payOrderAccess(w, r, dir, app, id)
+	if !ok {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -131,6 +177,7 @@ func (s *Server) handlePayCheckout(w http.ResponseWriter, r *http.Request) {
 func checkoutPage(order *pay.Order) string {
 	id := jsString(order.ID)
 	app := jsString(order.App)
+	token := jsString(order.Capability)
 	var rows strings.Builder
 	for _, it := range order.Items {
 		rows.WriteString("<tr><td>" + html.EscapeString(it.Name) + "</td><td>" +
@@ -172,7 +219,7 @@ button{background:#f97316;border:none;border-radius:8px;color:#fff;cursor:pointe
 </div>
 <script>
 document.getElementById('pay').onclick = function () {
-  fetch('/api/pay/orders/` + id + `/pay?app=` + app + `', {
+  fetch('/api/pay/orders/` + id + `/pay?app=` + app + `&token=` + token + `', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ card: document.getElementById('card').value }),

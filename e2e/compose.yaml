@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: atoms_e2e
+      POSTGRES_USER: atoms_e2e
+      POSTGRES_PASSWORD: local-e2e-only
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ../deploy/local/01-baseline.sql:/docker-entrypoint-initdb.d/01-baseline.sql:ro
+      - ../internal/identity/schema.sql:/docker-entrypoint-initdb.d/02-identity.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atoms_e2e -d atoms_e2e"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "127.0.0.1:51025:1025"
+      - "127.0.0.1:58025:8025"

@@ -44,6 +44,7 @@ func (it Item) LineString() string  { return trimFloat(it.LineTotal()) }
 // computed server-side from Items, never trusted from the client.
 type Order struct {
 	ID        string     `json:"id"`
+	Capability string   `json:"capability,omitempty"`
 	App       string     `json:"app"`
 	Items     []Item     `json:"items"`
 	Amount    float64    `json:"amount"`
@@ -104,8 +105,11 @@ func (s *Store) Create(dir, app string, items []Item) (*Order, error) {
 	if err != nil {
 		return nil, err
 	}
+	capability, err := newID()
+	if err != nil { return nil, err }
 	order := &Order{
 		ID:        id,
+		Capability: capability,
 		App:       app,
 		Items:     items,
 		Amount:    amount,

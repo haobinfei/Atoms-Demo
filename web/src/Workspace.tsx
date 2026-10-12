@@ -19,10 +19,12 @@ const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主�
 export default function Workspace({
   sessionId,
   user,
+  canPublish,
   onExit,
 }: {
   sessionId: string
   user: string
+  canPublish: boolean
   onExit: () => void
 }) {
   const [session, setSession] = useState<Session | null>(null)
@@ -96,8 +98,7 @@ export default function Workspace({
         watchdog = setInterval(reconcile, 15000)
       })
       .catch((err) => {
-        // A 401 here means the AuthSphere session expired mid-use; the
-        // only recovery is a fresh login.
+        // A 401 means the local session expired mid-use.
         if (isAuthError(err)) redirectToLogin()
         else console.error('load session failed', err)
       })
@@ -147,9 +148,7 @@ export default function Workspace({
         </div>
         <div className="ws-actions">
           <span className="ws-user">{user}</span>
-          <button disabled={session?.status === 'building'} onClick={() => setPublishOpen(true)}>
-            发布
-          </button>
+          {canPublish && <button disabled={session?.status === 'building'} onClick={() => setPublishOpen(true)}>发布</button>}
           <button onClick={() => setFilesOpen(true)}>代码</button>
           <a className="ws-export" href={`/api/sessions/${sessionId}/export`} download>
             导出

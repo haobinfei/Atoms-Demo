@@ -23,7 +23,7 @@ const STATUS_LABEL: Record<string, string> = {
   failed: '失败',
 }
 
-export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
+export default function Dashboard({ onOpen, canDelete }: { onOpen: (id: string) => void; canDelete: boolean }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [query, setQuery] = useState('')
   const [error, setError] = useState(false)
@@ -163,9 +163,7 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
               <button title="创建副本" onClick={() => void doDuplicate(sess)}>
                 ⎘
               </button>
-              <button title="删除" onClick={() => void doDelete(sess)}>
-                ×
-              </button>
+              {canDelete && <button title="删除" onClick={() => void doDelete(sess)}>×</button>}
             </div>
           </div>
         ))}

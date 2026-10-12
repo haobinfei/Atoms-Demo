@@ -6,15 +6,57 @@ services:
       context: .
       dockerfile: Dockerfile.server
     image: atoms-demo-server:latest
-    # 可选：.env 存在则加载，不存在也能一键起（server 全部有默认值）
+    # 可选：.env 存在则加载；缺省数据库与邮件配置由下方本地服务提供。
     env_file:
       - path: .env
         required: false
     environment:
       PORT: 4173
       WORKSPACE_DIR: /workspace
+      DATABASE_DSN: ${DATABASE_DSN:-postgres://atoms:local-dev-only@postgres:5432/atoms?sslmode=disable}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURITY: ${SMTP_SECURITY:-none}
+      SMTP_FROM: ${SMTP_FROM:-noreply@localhost}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      APP_BASE_URL: "http://localhost:${WEB_PORT:-8080}"
+      COOKIE_SECURE: "0"
+      # 默认忽略代理 IP 头；需要区分客户端时仅填写实际 Nginx/入口代理来源 CIDR。
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     volumes:
       - workspace:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: atoms
+      POSTGRES_USER: atoms
+      POSTGRES_PASSWORD: local-dev-only
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/local/01-baseline.sql:/docker-entrypoint-initdb.d/01-baseline.sql:ro
+      - ./internal/identity/schema.sql:/docker-entrypoint-initdb.d/02-identity.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atoms -d atoms"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_WEB_PORT:-8025}:8025"
     restart: unless-stopped
 
   web:
@@ -35,3 +77,4 @@ services:
 
 volumes:
   workspace:
+  postgres_data:
