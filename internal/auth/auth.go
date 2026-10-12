@@ -150,12 +150,23 @@ func (m *Middleware) verifyRequest(r *http.Request) (string, error) {
 // Login starts the authorization-code flow: 302 to AuthSphere's authorize
 // page with a state nonce kept in a cookie for the callback.
 func (m *Middleware) Login(w http.ResponseWriter, r *http.Request) {
+	// Production is HTTPS, but the ingress also exposes an HTTP listener.
+	// A Secure state cookie cannot be stored on an HTTP page, which makes
+	// the AuthSphere callback fail with "state mismatch". Redirect when
+	// the proxy explicitly says the request arrived over HTTP.
+	if !m.cfg.InsecureCookies && requestProto(r) == "http" {
+		if target := m.httpsLoginURL(r); target != "" {
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+	}
+
 	state, err := randomHex(16)
 	if err != nil {
 		http.Error(w, "generate state", http.StatusInternalServerError)
 		return
 	}
-	m.setCookie(w, CookieState, state, 10*time.Minute)
+	m.setCookie(w, r, CookieState, state, 10*time.Minute)
 	q := url.Values{
 		"response_type": {"code"},
 		"client_id":     {m.cfg.ClientID},
@@ -203,9 +214,9 @@ func (m *Middleware) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unusable user identity", http.StatusBadGateway)
 		return
 	}
-	m.setCookie(w, CookieToken, idToken, 24*time.Hour)
+	m.setCookie(w, r, CookieToken, idToken, 24*time.Hour)
 	// The nonce is single-use; drop it so a replayed callback URL dies here.
-	m.clearCookie(w, CookieState)
+	m.clearCookie(w, r, CookieState)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -248,7 +259,7 @@ func (m *Middleware) exchange(ctx context.Context, code string) (string, error) 
 	return body.IDToken, nil
 }
 
-func (m *Middleware) setCookie(w http.ResponseWriter, name, value string, ttl time.Duration) {
+func (m *Middleware) setCookie(w http.ResponseWriter, r *http.Request, name, value string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
@@ -256,20 +267,59 @@ func (m *Middleware) setCookie(w http.ResponseWriter, name, value string, ttl ti
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   !m.cfg.InsecureCookies,
+		Secure:   m.secureCookie(r, name),
 	})
 }
 
 // clearCookie expires a cookie immediately.
-func (m *Middleware) clearCookie(w http.ResponseWriter, name string) {
+func (m *Middleware) clearCookie(w http.ResponseWriter, r *http.Request, name string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   !m.cfg.InsecureCookies,
+		Secure:   m.secureCookie(r, name),
 	})
+}
+
+// secureCookie keeps the long-lived token Secure in production, while
+// allowing the short-lived state nonce to survive an HTTP login page when
+// the reverse proxy did not provide X-Forwarded-Proto. Cookies are not
+// scheme-scoped, so that non-Secure state cookie is still sent to the HTTPS
+// callback; the callback-issued token remains Secure.
+func (m *Middleware) secureCookie(r *http.Request, name string) bool {
+	if m.cfg.InsecureCookies {
+		return false
+	}
+	if name == CookieState {
+		return requestProto(r) == "https"
+	}
+	return true
+}
+
+// requestProto resolves the browser-facing scheme. TLS is authoritative;
+// otherwise Istio/Envoy supplies X-Forwarded-Proto. An empty value means the
+// request came from inside the cluster without proxy headers.
+func requestProto(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.IndexByte(proto, ','); i >= 0 {
+		proto = proto[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(proto))
+}
+
+// httpsLoginURL builds the canonical HTTPS login URL from the configured
+// redirect URL, avoiding Host-header redirects.
+func (m *Middleware) httpsLoginURL(r *http.Request) string {
+	u, err := url.Parse(m.cfg.RedirectURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return ""
+	}
+	return "https://" + u.Host + r.URL.RequestURI()
 }
 
 func randomHex(n int) (string, error) {
