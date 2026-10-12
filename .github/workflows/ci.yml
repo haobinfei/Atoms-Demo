@@ -42,6 +42,8 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('e2e/package-lock.json') }}
+      - name: Start E2E dependencies
+        run: docker compose -f e2e/compose.yaml up -d --wait
       - run: npm ci
         working-directory: e2e
       # webServer 会在 ../web 里执行 `npm run build && npm run preview`，
@@ -52,3 +54,6 @@ jobs:
         working-directory: e2e
       - run: npx playwright test
         working-directory: e2e
+      - name: Stop E2E dependencies
+        if: always()
+        run: docker compose -f e2e/compose.yaml down -v

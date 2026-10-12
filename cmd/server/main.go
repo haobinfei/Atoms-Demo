@@ -76,11 +76,15 @@ func main() {
 	}
 	defer store.Close()
 	cfg.Store = store
+	redisDB, err := strconv.Atoi(getenv("REDIS_DB", "0"))
+	if err != nil || redisDB < 0 {
+		log.Fatal("REDIS_DB must be a non-negative integer")
+	}
 	artifacts, artifactMode := newArtifacts()
 	cfg.Artifacts = artifacts
-	bus, busMode := newEventBus()
+	bus, busMode := newEventBus(redisDB)
 	cfg.Bus = bus
-	queue, queueMode := newJobQueue(cfg.QueueWorkers)
+	queue, queueMode := newJobQueue(cfg.QueueWorkers, redisDB)
 	cfg.Queue = queue
 	addr := ":" + getenv("PORT", "4173")
 	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=identity, store=postgres, artifacts=%s, bus=%s, queue=%s, workers=%d)",
@@ -135,7 +139,7 @@ func newArtifacts() (*artifact.Store, string) {
 // source of truth (ADR-0007): an empty host keeps the in-process MemoryBus,
 // and an unreachable Redis degrades to it without refusing to start —
 // clients still catch up through Postgres replay.
-func newEventBus() (eventstream.Bus, string) {
+func newEventBus(db int) (eventstream.Bus, string) {
 	host := os.Getenv("REDIS_HOST")
 	if host == "" {
 		return nil, "memory"
@@ -144,6 +148,7 @@ func newEventBus() (eventstream.Bus, string) {
 		Addr:     net.JoinHostPort(host, getenv("REDIS_PORT", "6379")),
 		Username: os.Getenv("REDIS_USERNAME"),
 		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       db,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -159,7 +164,7 @@ func newEventBus() (eventstream.Bus, string) {
 // unreachable Redis surfaces as an Enqueue error (HTTP 503) rather than a
 // silent fallback to a lossy in-process channel. An empty host keeps the
 // bounded in-process MemoryQueue for local dev and tests.
-func newJobQueue(workers int) (jobqueue.Queue, string) {
+func newJobQueue(workers, db int) (jobqueue.Queue, string) {
 	host := os.Getenv("REDIS_HOST")
 	if host == "" {
 		return nil, "memory"
@@ -168,6 +173,7 @@ func newJobQueue(workers int) (jobqueue.Queue, string) {
 		Addr:     net.JoinHostPort(host, getenv("REDIS_PORT", "6379")),
 		Username: os.Getenv("REDIS_USERNAME"),
 		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       db,
 	})
 	return jobqueue.NewRedisQueue(client, jobqueue.WithCapacity(workers*4)), "redis"
 }
