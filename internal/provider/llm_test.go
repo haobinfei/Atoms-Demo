@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -252,5 +253,63 @@ func TestBuildIterationPromptPrioritizesLatestRequest(t *testing.T) {
 	latest := strings.LastIndex(prompt, "【本轮最新要求｜最高优先级，必须执行】")
 	if latest < strings.LastIndex(prompt, "【历史迭代要求】") {
 		t.Fatalf("latest request must appear after history:\n%s", prompt)
+	}
+}
+
+// sseServer streams a completion as Server-Sent Events and records the
+// request body so tests can assert the client actually asked for a stream.
+func sseServer(t *testing.T, chunks ...string) (*httptest.Server, *[]byte) {
+	t.Helper()
+	var got []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, c := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &got
+}
+
+func TestDeepSeekReassemblesStreamedSSE(t *testing.T) {
+	srv, body := sseServer(t,
+		`{"choices":[{"delta":{"reasoning_content":"thinking..."}}]}`,
+		`{"choices":[{"delta":{"content":"{\"files\":{\"index.html\":"}}]}`,
+		`{"choices":[{"delta":{"content":"\"<html></html>\",\"src/main.tsx\":\"x\"}}"},"finish_reason":"stop"}]}`,
+	)
+	p := provider.NewDeepSeek(srv.URL+"/v1", "key", "deepseek-v4-pro")
+
+	files, err := p.Generate(context.Background(), "x", func(string, string) {})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if files["index.html"] != "<html></html>" {
+		t.Fatalf("stream not reassembled: %v", files)
+	}
+	var sent struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(*body, &sent); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if !sent.Stream {
+		t.Fatal("client did not request stream=true")
+	}
+}
+
+func TestStreamedReasoningOnlyOutputFails(t *testing.T) {
+	srv, _ := sseServer(t, `{"choices":[{"delta":{"reasoning_content":"thinking hard"},"finish_reason":"length"}]}`)
+	p := provider.NewKimi(srv.URL+"/v1", "sk-test", "")
+
+	_, err := p.Generate(context.Background(), "x", func(string, string) {})
+	if err == nil || !strings.Contains(err.Error(), "reasoning") {
+		t.Fatalf("want reasoning-budget error, got: %v", err)
 	}
 }

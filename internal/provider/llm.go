@@ -37,7 +37,8 @@ func NewDeepSeek(baseURL, apiKey, model string) *DeepSeekProvider {
 		model = "deepseek-v4-pro"
 	}
 	return &DeepSeekProvider{Client: &openAIClient{
-		baseURL: baseURL, apiKey: apiKey, model: model, http: defaultHTTPClient(120 * time.Second),
+		baseURL: baseURL, apiKey: apiKey, model: model, stream: true,
+		http: defaultHTTPClient(15 * time.Minute),
 	}}
 }
 
@@ -71,7 +72,8 @@ func NewLocal(baseURL, model string) *LocalProvider {
 		baseURL = "http://192.168.1.101:8090/v1"
 	}
 	return &LocalProvider{Client: &openAIClient{
-		baseURL: baseURL, model: model, http: defaultHTTPClient(300 * time.Second),
+		baseURL: baseURL, model: model, stream: true,
+		http: defaultHTTPClient(15 * time.Minute),
 	}}
 }
 
@@ -125,7 +127,8 @@ func NewKimi(baseURL, apiKey, model string) *KimiProvider {
 	// kimi-for-coding only accepts temperature=1.
 	one := 1.0
 	return &KimiProvider{Client: &openAIClient{
-		baseURL: baseURL, apiKey: apiKey, model: model, http: defaultHTTPClient(300 * time.Second),
+		baseURL: baseURL, apiKey: apiKey, model: model, stream: true,
+		http:        defaultHTTPClient(15 * time.Minute),
 		temperature: &one,
 	}}
 }

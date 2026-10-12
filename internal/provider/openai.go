@@ -3,6 +3,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -26,6 +27,24 @@ type chatRequest struct {
 	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format,omitempty"`
+	// Stream keeps bytes flowing while the model writes. Long app
+	// generations otherwise sit silent past every proxy's idle timeout
+	// (Cloudflare 524, http.Client.Timeout) even when the model is fine.
+	Stream bool `json:"stream,omitempty"`
+}
+
+// chatChunk is one SSE delta from a streaming completion.
+type chatChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 type chatResponse struct {
@@ -50,6 +69,8 @@ type openAIClient struct {
 	// temperature overrides the request default (0.4); some endpoints
 	// (Kimi Code) reject any value but their fixed one.
 	temperature *float64
+	// stream requests SSE deltas and reassembles them locally.
+	stream bool
 }
 
 func (c *openAIClient) chat(ctx context.Context, messages []chatMessage, maxTokens int, jsonMode bool) (string, error) {
@@ -69,6 +90,7 @@ func (c *openAIClient) chat(ctx context.Context, messages []chatMessage, maxToke
 			Type string `json:"type"`
 		}{Type: "json_object"}
 	}
+	reqBody.Stream = c.stream
 	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", err
@@ -86,12 +108,18 @@ func (c *openAIClient) chat(ctx context.Context, messages []chatMessage, maxToke
 		return "", fmt.Errorf("%s request: %w", c.model, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return "", fmt.Errorf("%s status %d: %.200s", c.model, resp.StatusCode, body)
+	}
+	// A gateway may answer a stream request with a plain JSON body (test
+	// doubles and some aggregators do); fall through to the batch parser.
+	if c.stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		return c.readStream(resp.Body)
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s status %d: %.200s", c.model, resp.StatusCode, body)
 	}
 	var out chatResponse
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -109,6 +137,54 @@ func (c *openAIClient) chat(ctx context.Context, messages []chatMessage, maxToke
 			c.model, out.Choices[0].FinishReason)
 	}
 	return content, nil
+}
+
+// readStream reassembles an SSE completion. Only delta.content is kept;
+// reasoning deltas (DeepSeek's chain-of-thought) are not part of the reply.
+func (c *openAIClient) readStream(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64<<10), 8<<20)
+	var content strings.Builder
+	var sawReasoning bool
+	var finish string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		payload, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk chatChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		if chunk.Error != nil && chunk.Error.Message != "" {
+			return "", fmt.Errorf("%s: %s", c.model, chunk.Error.Message)
+		}
+		for _, choice := range chunk.Choices {
+			content.WriteString(choice.Delta.Content)
+			if choice.Delta.ReasoningContent != "" {
+				sawReasoning = true
+			}
+			if choice.FinishReason != "" {
+				finish = choice.FinishReason
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("%s stream: %w", c.model, err)
+	}
+	out := content.String()
+	if out == "" {
+		if sawReasoning {
+			return "", fmt.Errorf("%s spent its token budget on reasoning (finish=%q); raise max_tokens", c.model, finish)
+		}
+		return "", fmt.Errorf("%s stream ended without content (finish=%q)", c.model, finish)
+	}
+	return out, nil
 }
 
 func defaultHTTPClient(timeout time.Duration) *http.Client {
