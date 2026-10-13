@@ -56,7 +56,7 @@ export function Workspaces({ account, refresh, onWorkspaceDeleted }: {
       {account.workspaces.map((workspace) => <div className="manage-row" key={workspace.id}>
         <div><strong>{workspace.name}</strong><small>{workspace.kind === 'personal' ? '个人工作区' : '团队工作区'} · {workspace.role === 'owner' ? '所有者' : '编辑者'}</small></div>
         {workspace.id === account.currentWorkspace && <span className="current-badge">当前</span>}
-        {workspace.kind === 'team' && workspace.role === 'owner' && <button className="danger-link" onClick={async () => {
+        {workspace.kind === 'team' && workspace.role === 'owner' && <button className="btn btn--sm btn--danger" onClick={async () => {
           if (!window.confirm(`删除「${workspace.name}」及其中所有项目？公开链接也将立即失效。此操作不可恢复。`)) return
           if (window.prompt(`再次输入工作区名称「${workspace.name}」以确认删除`) !== workspace.name) return
           setError(''); setNotice('')
@@ -67,8 +67,8 @@ export function Workspaces({ account, refresh, onWorkspaceDeleted }: {
     </div>
     <form className="manage-form" onSubmit={(event) => void create(event)}>
       <h2>创建团队工作区</h2>
-      <label>名称<input value={name} maxLength={80} required onChange={(event) => setName(event.target.value)} placeholder="例如：产品团队" /></label>
-      <button className="primary-action" disabled={busy || !name.trim()}>{busy ? '创建中…' : '创建工作区'}</button>
+      <label className="field">名称<input value={name} maxLength={80} required onChange={(event) => setName(event.target.value)} placeholder="例如：产品团队" /></label>
+      <button className="btn btn--primary" disabled={busy || !name.trim()}>{busy ? '创建中…' : '创建工作区'}</button>
     </form>
     {error && <p className="auth-alert" role="alert">{error}</p>}{notice && <p className="auth-notice" role="status">{notice}</p>}
   </main>
@@ -130,8 +130,8 @@ export function TeamSettings({ workspace, account, onLeft }: { workspace: Worksp
             <option value="editor">编辑者</option><option value="owner">所有者</option>
           </select>}
           {member.accountId === account.id
-            ? <button className="danger-link" disabled={busy} onClick={() => void leave()}>退出工作区</button>
-            : <button className="danger-link" disabled={busy} onClick={() => {
+            ? <button className="btn btn--sm btn--danger" disabled={busy} onClick={() => void leave()}>退出工作区</button>
+            : <button className="btn btn--sm btn--danger" disabled={busy} onClick={() => {
               if (window.confirm(`移除 ${member.email}？`)) void run(() => removeMember(workspace.id, member.accountId), '成员已移除。')
             }}>移除</button>}
         </div>}
@@ -140,16 +140,16 @@ export function TeamSettings({ workspace, account, onLeft }: { workspace: Worksp
     {owner && <><section className="manage-section">
       <h2>邀请成员</h2>
       <form className="invite-form" onSubmit={(event) => { event.preventDefault(); void run(async () => { await inviteMember(workspace.id, email.trim(), role); setEmail('') }, '邀请已发送。') }}>
-        <label>邮箱<input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" /></label>
-        <label>角色<select value={role} onChange={(event) => setRole(event.target.value as Member['role'])}><option value="editor">编辑者</option><option value="owner">所有者</option></select></label>
-        <button className="primary-action" disabled={busy || !email.trim()}>发送邀请</button>
+        <label className="field">邮箱<input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" /></label>
+        <label className="field">角色<select value={role} onChange={(event) => setRole(event.target.value as Member['role'])}><option value="editor">编辑者</option><option value="owner">所有者</option></select></label>
+        <button className="btn btn--primary" disabled={busy || !email.trim()}>发送邀请</button>
       </form>
       <p className="manage-hint">邀请仅限指定邮箱的已验证账户接受，七天内有效。</p>
     </section><section className="manage-section"><h2>待接受邀请</h2>
       <div className="manage-list">{invitations.length === 0 && <p className="empty-state">暂无待接受邀请</p>}
         {invitations.map((invitation) => <div className="manage-row" key={invitation.id}>
           <div><strong>{invitation.email}</strong><small>{invitation.role === 'owner' ? '所有者' : '编辑者'} · {new Date(invitation.expiresAt).toLocaleString()} 到期</small></div>
-          <button className="danger-link" disabled={busy} onClick={() => void run(() => revokeInvitation(workspace.id, invitation.id), '邀请已撤销。')}>撤销</button>
+          <button className="btn btn--sm btn--danger" disabled={busy} onClick={() => void run(() => revokeInvitation(workspace.id, invitation.id), '邀请已撤销。')}>撤销</button>
         </div>)}
       </div>
     </section></>}
@@ -178,14 +178,14 @@ export function AccountSettings({ account, onDeleted }: { account: Account; onDe
     <header className="manage-heading"><h1>账户设置</h1><p>{account.email}</p></header>
     <section className="manage-section"><h2>修改密码</h2>
       <form className="manage-form" onSubmit={(event) => void submit(event)}>
-        <label>当前密码<input type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
-        <label>新密码（至少 12 位）<input type="password" autoComplete="new-password" minLength={12} required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
-        <label>确认新密码<input type="password" autoComplete="new-password" minLength={12} required value={confirm} onChange={(event) => setConfirm(event.target.value)} /></label>
-        <button className="primary-action" disabled={busy}>保存密码</button>
+        <label className="field">当前密码<input type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
+        <label className="field">新密码（至少 12 位）<input type="password" autoComplete="new-password" minLength={12} required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
+        <label className="field">确认新密码<input type="password" autoComplete="new-password" minLength={12} required value={confirm} onChange={(event) => setConfirm(event.target.value)} /></label>
+        <button className="btn btn--primary" disabled={busy}>保存密码</button>
       </form>
     </section>
     <section className="manage-section danger-zone"><h2>删除账户</h2><p>个人工作区及其中的公开应用将立即下线。请先交接你独占所有权的团队工作区。</p>
-      <button className="danger-link" disabled={busy} onClick={async () => {
+      <button className="btn btn--danger" disabled={busy} onClick={async () => {
         if (!window.confirm('确定删除账户及个人工作区？此操作不可恢复。')) return
         if (window.prompt(`输入邮箱 ${account.email} 确认删除`) !== account.email) return
         setBusy(true); setError('')
@@ -226,8 +226,11 @@ export function AdminSettings({ currentAccountId }: { currentAccountId: string }
     <header className="manage-heading"><h1>平台管理</h1><p>账户与工作区归属处置。管理员身份不授予项目内容访问权。</p></header>
     <section className="manage-section"><h2>账户</h2><div className="manage-list">
       {accounts.map((account) => <div className="manage-row" key={account.id}>
-        <div><strong>{account.email}</strong><small>{account.disabled ? '已停用' : account.verified ? '正常' : '未验证'} · {(account.memberships ?? []).map((m) => `${m.workspaceName}（${m.role === 'owner' ? '所有者' : '编辑者'}）`).join('、') || '无工作区'}</small></div>
-        <button disabled={busy || account.id === currentAccountId} title={account.id === currentAccountId ? '不能停用当前管理员账户' : undefined} onClick={() => {
+        <div><strong>{account.email}</strong><small>{(account.memberships ?? []).map((m) => `${m.workspaceName}（${m.role === 'owner' ? '所有者' : '编辑者'}）`).join('、') || '无工作区'}</small></div>
+        <span className={account.disabled ? 'badge badge--danger' : account.verified ? 'badge badge--success' : 'badge badge--muted'}>
+          {account.disabled ? '已停用' : account.verified ? '正常' : '未验证'}
+        </span>
+        <button className="btn btn--sm" disabled={busy || account.id === currentAccountId} title={account.id === currentAccountId ? '不能停用当前管理员账户' : undefined} onClick={() => {
           const reason = window.prompt(`${account.disabled ? '恢复' : '停用'} ${account.email} 的原因（必填）`)
           if (reason?.trim()) void run(() => setAccountDisabled(account.id, !account.disabled, reason.trim()), '账户状态已更新。')
         }}>{account.disabled ? '恢复' : '停用'}</button>
@@ -235,10 +238,10 @@ export function AdminSettings({ currentAccountId }: { currentAccountId: string }
     </div></section>
     <section className="manage-section"><h2>所有者救援</h2>
       <form className="manage-form" onSubmit={(event) => { event.preventDefault(); void run(() => rescueWorkspace(workspaceId.trim(), accountId.trim(), reason.trim()), '所有者归属已更新。') }}>
-        <label>工作区 ID<input required value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} /></label>
-        <label>新所有者账户 ID<input required value={accountId} onChange={(event) => setAccountId(event.target.value)} /></label>
-        <label>处置原因<textarea required minLength={5} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-        <button className="primary-action" disabled={busy}>提交救援</button>
+        <label className="field">工作区 ID<input required value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} /></label>
+        <label className="field">新所有者账户 ID<input required value={accountId} onChange={(event) => setAccountId(event.target.value)} /></label>
+        <label className="field">处置原因<textarea required minLength={5} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+        <button className="btn btn--primary" disabled={busy}>提交救援</button>
       </form>
     </section>
     <section className="manage-section"><h2>管理审计</h2><div className="manage-list">

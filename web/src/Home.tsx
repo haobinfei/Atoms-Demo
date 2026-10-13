@@ -41,18 +41,17 @@ export default function Home({
 
   return (
     <div className="home">
-      <div className="home-user">{user}</div>
-      <nav className="home-tabs">
-        <button className={view === 'new' ? 'on' : ''} onClick={() => onViewChange('new')}>
+      <div className="home-brand">Atoms Demo</div>
+      <nav className="tabs home-tabs">
+        <button className={view === 'new' ? 'tab is-active' : 'tab'} onClick={() => onViewChange('new')}>
           新建项目
         </button>
-        <button className={view === 'projects' ? 'on' : ''} onClick={() => onViewChange('projects')}>
+        <button className={view === 'projects' ? 'tab is-active' : 'tab'} onClick={() => onViewChange('projects')}>
           我的项目
         </button>
       </nav>
-      <div className="home-brand">Atoms Demo</div>
       {view === 'projects' ? (
-        <Dashboard onOpen={onCreated} canDelete={canDelete} />
+        <Dashboard onOpen={onCreated} canDelete={canDelete} onNewProject={() => onViewChange('new')} />
       ) : (
         <>
           <h1 className="home-title">把想法变成可运行的应用</h1>

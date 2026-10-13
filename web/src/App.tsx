@@ -16,7 +16,9 @@ export default function App() {
   const [page, setPage] = useState<Page>('projects')
   const [switching, setSwitching] = useState(false)
   const [notice, setNotice] = useState('')
+  const [noticeError, setNoticeError] = useState(false)
   const [inviteToken, setInviteToken] = useState(() => new URLSearchParams(location.search).get('invite'))
+  const [menuOpen, setMenuOpen] = useState(false)
 
   async function refresh() {
     const next = await getMe()
@@ -49,6 +51,7 @@ export default function App() {
       setHomeView('projects')
       history.replaceState(null, '', '/')
     } catch (cause) {
+      setNoticeError(true)
       setNotice(cause instanceof Error ? cause.message : '切换工作区失败。')
     } finally { setSwitching(false) }
   }
@@ -61,6 +64,7 @@ export default function App() {
       setPage('projects')
       history.replaceState(null, '', '/')
     } catch (cause) {
+      setNoticeError(true)
       setNotice(cause instanceof Error ? cause.message : '退出失败，请稍后重试。')
     }
   }
@@ -84,10 +88,30 @@ export default function App() {
         <button className={page === 'account' ? 'active' : ''} onClick={() => setPage('account')}>账户</button>
         {account.admin && <button className={page === 'admin' ? 'active' : ''} onClick={() => setPage('admin')}>平台管理</button>}
       </nav>
-      <span className="app-email" title={account.email}>{account.email}</span>
-      <button className="signout-button" onClick={() => void signOut()}>退出</button>
+      <div className="menu">
+        <button
+          className="menu-trigger"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <span className="avatar">{account.email.slice(0, 1)}</span>
+          <span className="app-email" title={account.email}>{account.email}</span>
+        </button>
+        {menuOpen && (
+          <>
+            <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
+            <div className="menu-panel" role="menu">
+              <div className="menu-header">{account.email}</div>
+              <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('account') }}>账户设置</button>
+              <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('workspaces') }}>工作区</button>
+              <button role="menuitem" className="is-danger" onClick={() => { setMenuOpen(false); void signOut() }}>退出登录</button>
+            </div>
+          </>
+        )}
+      </div>
     </header>
-    {notice && <div className="app-notice" role="alert">{notice}<button onClick={() => setNotice('')} aria-label="关闭提示">×</button></div>}
+    {notice && <div className={noticeError ? 'app-notice app-notice--error' : 'app-notice'} role="alert">{notice}<button onClick={() => { setNotice(''); setNoticeError(false) }} aria-label="关闭提示">×</button></div>}
     {inviteToken && <div className="invite-banner">
       <span>你收到了工作区邀请。</span>
       <button className="primary-action" onClick={async () => {
@@ -96,8 +120,9 @@ export default function App() {
           await refresh()
           setInviteToken(null)
           history.replaceState(null, '', '/')
+          setNoticeError(false)
           setNotice('已加入工作区。可从顶部切换。')
-        } catch (cause) { setNotice(cause instanceof Error ? cause.message : '邀请无效或已过期。') }
+        } catch (cause) { setNoticeError(true); setNotice(cause instanceof Error ? cause.message : '邀请无效或已过期。') }
       }}>接受邀请</button>
       <button onClick={() => { setInviteToken(null); history.replaceState(null, '', '/') }}>忽略</button>
     </div>}

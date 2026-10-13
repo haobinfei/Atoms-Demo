@@ -95,7 +95,16 @@ export default function Auth({ onLogin }: { onLogin: () => Promise<void> }) {
 
   return (
     <main className="auth-page">
-      <div className="auth-mark">Atoms</div>
+      <aside className="auth-brand">
+        <div className="auth-brand-logo">Atoms</div>
+        <h2 className="auth-brand-title">把想法变成可运行的应用</h2>
+        <p className="auth-brand-sub">描述你想要的，一支 AI 团队会为你生成、构建并发布。</p>
+        <ul className="auth-brand-points">
+          <li>生成：从一句话需求产出全栈代码</li>
+          <li>预览：桌面与移动视口即时查看</li>
+          <li>发布：一键分享可访问的公开链接</li>
+        </ul>
+      </aside>
       <div className="auth-form-wrap">
         <h1>{titles[mode]}</h1>
         {mode === 'verify' && <p className="auth-description">验证后即可进入个人工作区。没有收到邮件时可重新发送。</p>}

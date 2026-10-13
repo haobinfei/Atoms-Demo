@@ -109,7 +109,9 @@ export default function PublishPanel({
         {publicURL && (
           <div className="pub-link-row">
             <code className="pub-link">{publicURL}</code>
-            <button onClick={() => void copyLink()}>{copied ? '已复制' : '复制链接'}</button>
+            <button className="btn btn--ghost" onClick={() => void copyLink()}>
+              {copied ? '已复制' : '复制链接'}
+            </button>
           </div>
         )}
 
@@ -118,10 +120,14 @@ export default function PublishPanel({
         {error && <div className="ws-chat-error">操作失败，请稍后重试</div>}
 
         <div className="pub-actions">
-          <button className="pub-primary" disabled={publishing} onClick={() => void doPublish()}>
+          <button className="btn btn--primary" disabled={publishing} onClick={() => void doPublish()}>
             {publishing ? '发布中…' : latest ? `再次发布（下一版 v${latest.version + 1}）` : '发布 v1'}
           </button>
-          {published && <button className="pub-unpublish" disabled={publishing} onClick={() => void doUnpublish()}>取消公开</button>}
+          {published && (
+            <button className="btn btn--danger" disabled={publishing} onClick={() => void doUnpublish()}>
+              取消公开
+            </button>
+          )}
         </div>
 
         {publishes.length > 0 && (

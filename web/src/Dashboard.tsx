@@ -23,7 +23,48 @@ const STATUS_LABEL: Record<string, string> = {
   failed: '失败',
 }
 
-export default function Dashboard({ onOpen, canDelete }: { onOpen: (id: string) => void; canDelete: boolean }) {
+const STATUS_BADGE: Record<string, string> = {
+  building: 'badge',
+  ready: 'badge badge--success',
+  failed: 'badge badge--danger',
+}
+
+function ProjectCover({ session }: { session: SessionSummary }) {
+  const [previewFailed, setPreviewFailed] = useState(false)
+  const canPreview = session.status === 'ready' && !previewFailed
+
+  return (
+    <div className={`dash-cover cover-${session.category}`} aria-label={`${session.name} 项目预览`}>
+      {canPreview ? (
+        <div className="dash-cover-frame">
+          <iframe
+            src={`/app/${session.id}/?v=${encodeURIComponent(session.updatedAt)}`}
+            title={`${session.name} 预览`}
+            loading="lazy"
+            tabIndex={-1}
+            onError={() => setPreviewFailed(true)}
+          />
+        </div>
+      ) : (
+        <>
+          <span>{(session.name.trim()[0] ?? 'A').toUpperCase()}</span>
+          <small>{session.status === 'building' ? '正在构建' : '预览暂不可用'}</small>
+        </>
+      )}
+      {canPreview && <span className="dash-cover-live">实时预览</span>}
+    </div>
+  )
+}
+
+export default function Dashboard({
+  onOpen,
+  canDelete,
+  onNewProject,
+}: {
+  onOpen: (id: string) => void
+  canDelete: boolean
+  onNewProject: () => void
+}) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [query, setQuery] = useState('')
   const [error, setError] = useState(false)
@@ -113,13 +154,31 @@ export default function Dashboard({ onOpen, canDelete }: { onOpen: (id: string) 
       />
       {error && <div className="ws-chat-error">操作失败，请稍后重试</div>}
       {sessions.length === 0 && !error && (
-        <div className="dash-empty">{query ? '没有匹配的项目' : '还没有项目，去新建一个吧'}</div>
+        <div className="dash-empty">
+          <div className="dash-empty-title">{query ? '没有匹配的项目' : '还没有项目'}</div>
+          <p>
+            {query
+              ? '换个关键词再试试，或清空搜索框查看全部项目。'
+              : '描述一个想法，AI 团队会把它生成、构建并发布成可运行的应用。'}
+          </p>
+          {!query && (
+            <button className="btn btn--primary" onClick={onNewProject}>
+              新建项目
+            </button>
+          )}
+        </div>
       )}
       <div className="dash-grid">
         {sessions.map((sess) => (
           <div key={sess.id} className={`dash-card dash-${sess.status}`}>
+            <ProjectCover session={sess} />
             <button className="dash-open" onClick={() => onOpen(sess.id)}>
-              <span className="dash-cat">{CATEGORY_LABEL[sess.category] ?? sess.category}</span>
+              <div className="dash-meta">
+                <span className="badge badge--accent">{CATEGORY_LABEL[sess.category] ?? sess.category}</span>
+                <span className={STATUS_BADGE[sess.status] ?? 'badge'}>
+                  {STATUS_LABEL[sess.status] ?? sess.status}
+                </span>
+              </div>
               {renaming === sess.id ? (
                 <form
                   onSubmit={(e) => {
@@ -138,9 +197,6 @@ export default function Dashboard({ onOpen, canDelete }: { onOpen: (id: string) 
               ) : (
                 <span className="dash-name">{sess.name}</span>
               )}
-              <span className={`ws-status ws-status-${sess.status}`}>
-                {STATUS_LABEL[sess.status] ?? sess.status}
-              </span>
               <time className="dash-time">{new Date(sess.updatedAt).toLocaleString()}</time>
             </button>
             <div className="dash-actions">
