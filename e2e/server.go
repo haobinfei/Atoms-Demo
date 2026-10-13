@@ -53,10 +53,11 @@ func main() {
 		TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
 		Prov:              provider.NewTemplate(),
 		Store:             store,
-		// Slower than production on purpose: a 回合 has to still be running
-		// when a spec clicks 取消本回合, and 120ms per stage leaves no room on
-		// a loaded CI runner.
-		StepDelay: 400 * time.Millisecond,
+		// Slower than production on purpose. Two specs need a 回合 to still be
+		// running while the browser acts: a spec clicks 取消本回合, and the
+		// 演示路径 refreshes the page mid-build. 120ms per stage leaves no room
+		// for either on a loaded CI runner.
+		StepDelay: 1500 * time.Millisecond,
 	})
 	defer srv.Close()
 	log.Fatal(http.ListenAndServe("127.0.0.1:4173", srv.Handler()))
