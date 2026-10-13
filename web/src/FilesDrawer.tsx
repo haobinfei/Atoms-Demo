@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getFile, listFiles, type FileEntry } from './api'
+import { highlight } from './highlight'
 
 export default function FilesDrawer({
   sessionId,
@@ -13,6 +14,8 @@ export default function FilesDrawer({
   const [files, setFiles] = useState<FileEntry[]>([])
   const [active, setActive] = useState<string | null>(null)
   const [content, setContent] = useState('')
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [query, setQuery] = useState('')
   const [copied, setCopied] = useState(false)
   const copyTimer = useRef<number | null>(null)
 
@@ -31,19 +34,32 @@ export default function FilesDrawer({
     if (!active) return
     let stale = false
     setContent('')
+    setLoadFailed(false)
     void getFile(sessionId, active)
       .then((f) => {
         if (!stale) setContent(f.content)
       })
       .catch(() => {
-        if (!stale) setContent('// 加载失败')
+        // Stated as a failure rather than dressed up as source: a comment
+        // reading "加载失败" is indistinguishable from a real comment.
+        if (!stale) setLoadFailed(true)
       })
     return () => {
       stale = true
     }
   }, [active, sessionId])
 
+  // Colourising is pure and only depends on what is open, so it must not run
+  // again on every keystroke in the search box.
+  const lines = useMemo(
+    () => (active && !loadFailed ? highlight(content, active) : []),
+    [content, active, loadFailed],
+  )
+
   if (!open) return null
+
+  const needle = query.trim().toLowerCase()
+  const visible = needle ? files.filter((f) => f.path.toLowerCase().includes(needle)) : files
 
   const copy = async () => {
     await navigator.clipboard.writeText(content)
@@ -62,23 +78,62 @@ export default function FilesDrawer({
           </button>
         </div>
         <div className="fd-body">
-          <ul className="fd-list">
-            {files.map((f) => (
-              <li key={f.path}>
-                <button className={active === f.path ? 'on' : ''} onClick={() => setActive(f.path)}>
-                  {f.path}
-                </button>
-              </li>
-            ))}
-          </ul>
+          <div className="fd-side">
+            <input
+              className="fd-search"
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="按文件名搜索…"
+              aria-label="按文件名搜索"
+            />
+            {visible.length === 0 ? (
+              <p className="fd-no-match">没有匹配「{query.trim()}」的文件。</p>
+            ) : (
+              <ul className="fd-list">
+                {visible.map((f) => (
+                  <li key={f.path}>
+                    <button className={active === f.path ? 'on' : ''} onClick={() => setActive(f.path)}>
+                      {f.path}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <div className="fd-view">
             {active ? (
               <>
                 <div className="fd-toolbar">
                   <code>{active}</code>
-                  <button onClick={() => void copy()}>{copied ? '已复制' : '复制'}</button>
+                  <button onClick={() => void copy()} disabled={loadFailed}>
+                    {copied ? '已复制' : '复制'}
+                  </button>
                 </div>
-                <pre>{content}</pre>
+                {loadFailed ? (
+                  <div className="fd-error" role="status">
+                    这个文件读不出来，可能是它刚被重新生成。关掉再打开代码抽屉即可重试。
+                  </div>
+                ) : (
+                  <div className="fd-code" role="group" aria-label="源码">
+                    {lines.map((tokens, i) => (
+                      <div className="fd-line" key={i}>
+                        <span className="fd-line-no">{i + 1}</span>
+                        <code className="fd-line-text">
+                          {tokens.map((token, j) =>
+                            token.kind === 'plain' ? (
+                              token.text
+                            ) : (
+                              <span key={j} className={`tok-${token.kind}`}>
+                                {token.text}
+                              </span>
+                            ),
+                          )}
+                        </code>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </>
             ) : (
               <div className="fd-empty">选择左侧文件查看内容</div>
