@@ -29,16 +29,47 @@ const STATUS_BADGE: Record<string, string> = {
   failed: 'badge badge--danger',
 }
 
+// How far outside the viewport a card may sit and still keep its preview
+// mounted. The margin keeps a frame ready just before it scrolls in.
+const COVER_ROOT_MARGIN = '150px'
+
 // The cover only renders a live frame when the server says a build is
 // servable; otherwise it states why. Loading an iframe first and reacting to
 // onError cannot work, because an HTTP error page loads "successfully"
 // (ADR-0014).
+//
+// It also only renders that frame near the viewport. Every mounted frame is a
+// whole application, so a long list would otherwise boot one per card and
+// drag the page down (ticket #31).
 function ProjectCover({ session }: { session: SessionSummary }) {
   const [loaded, setLoaded] = useState(false)
-  const canPreview = session.previewReady
+  const [inView, setInView] = useState(false)
+  const hostRef = useRef<HTMLDivElement | null>(null)
 
-  const note = session.previewReady
-    ? ''
+  useEffect(() => {
+    const node = hostRef.current
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setInView(true)
+      return
+    }
+    const observer = new IntersectionObserver(
+      (entries) => setInView(entries.some((entry) => entry.isIntersecting)),
+      { rootMargin: COVER_ROOT_MARGIN },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  // Leaving the viewport unmounts the frame, so re-entering remounts it and
+  // must show the loading state rather than a stale "loaded" flag.
+  useEffect(() => {
+    if (!inView) setLoaded(false)
+  }, [inView])
+
+  const canPreview = session.previewReady
+  const showFrame = canPreview && inView
+  const note = canPreview
+    ? '实时预览'
     : session.status === 'building'
       ? '正在构建'
       : session.status === 'failed'
@@ -46,8 +77,12 @@ function ProjectCover({ session }: { session: SessionSummary }) {
         : '暂无预览'
 
   return (
-    <div className={`dash-cover cover-${session.category}`} aria-label={`${session.name} 项目预览`}>
-      {canPreview ? (
+    <div
+      ref={hostRef}
+      className={`dash-cover cover-${session.category}`}
+      aria-label={`${session.name} 项目预览`}
+    >
+      {showFrame ? (
         <div className={loaded ? 'dash-cover-frame is-loaded' : 'dash-cover-frame'}>
           <span className="dash-cover-loading">预览加载中…</span>
           <iframe
@@ -64,7 +99,7 @@ function ProjectCover({ session }: { session: SessionSummary }) {
           <small>{note}</small>
         </>
       )}
-      {canPreview && <span className="dash-cover-live">实时预览</span>}
+      {showFrame && <span className="dash-cover-live">实时预览</span>}
     </div>
   )
 }
