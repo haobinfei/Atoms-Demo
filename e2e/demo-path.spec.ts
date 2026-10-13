@@ -18,7 +18,10 @@ test('演示路径：登录 → 生成 → 刷新 → 排队 → 取消 → 追�
   request,
 }) => {
   // One step observes 60s of silence on purpose.
-  test.setTimeout(300_000)
+  test.setTimeout(240_000)
+  // Bound every action. A multi-step case that hangs would otherwise burn the
+  // whole test budget and report nothing about which step it was in.
+  page.setDefaultTimeout(30_000)
 
   let sessionId = ''
   let beforeCancel = ''
@@ -40,9 +43,10 @@ test('演示路径：登录 → 生成 → 刷新 → 排队 → 取消 → 追�
     await page.locator('.menu-trigger').click()
     await expect(page.getByRole('menuitem', { name: '账户设置' })).toBeVisible()
     await expect(page.getByRole('menuitem', { name: '退出登录' })).toBeVisible()
-    // Toggle it shut: the panel hangs below the trigger, so the trigger is
-    // still the click target.
-    await page.locator('.menu-trigger').click()
+    // Close it by clicking the backdrop, not the trigger: the backdrop
+    // (z-index 39) is a sibling of the trigger and covers it while open, so a
+    // second trigger click never lands.
+    await page.locator('.menu-backdrop').click()
     await expect(page.getByRole('menuitem', { name: '账户设置' })).toHaveCount(0)
   })
 
@@ -203,7 +207,7 @@ test('演示路径：登录 → 生成 → 刷新 → 排队 → 取消 → 追�
     const publicURL = await page.locator('.pub-link').innerText()
     expect(publicURL).toContain(`/app/${sessionId}/`)
 
-    await page.getByRole('button', { name: '关闭' }).click()
+    await page.getByRole('button', { name: '关闭', exact: true }).click()
     await expect(page.locator('.preview-badge')).toHaveText('已发布版')
   })
 })
