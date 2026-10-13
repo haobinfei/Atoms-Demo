@@ -14,8 +14,12 @@ test('only covers near the viewport keep a live preview', async ({ page, request
   for (let i = 0; i < PROJECTS; i++) {
     const resp = await page.request.post(`${WEB}/api/sessions`, {
       data: { prompt: `第 ${i + 1} 个项目` },
+      // Write requests carry a same-origin guard (origin header, or a
+      // same-origin fetch metadata hint). A raw API client sends neither, so
+      // state it explicitly rather than being rejected with 403.
+      headers: { 'Sec-Fetch-Site': 'same-origin' },
     })
-    expect(resp.ok(), `create project ${i + 1}`).toBe(true)
+    expect(resp.status(), `create project ${i + 1}`).toBe(200)
   }
   // Every build must land before the covers can show anything.
   await expect
