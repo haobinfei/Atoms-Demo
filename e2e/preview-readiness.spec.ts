@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { registerVerifyAndLogin } from './auth'
+import { stubSession } from './stub-session'
 
 // Ticket #27: preview availability is decided server-side, so neither the
 // project list nor the workspace ever mounts a frame that has nothing to
@@ -33,25 +34,8 @@ test('the workspace states why there is no preview instead of loading an error p
   await expect(page.locator('.preview-stage .frame')).toBeVisible()
   await expect(page.locator('.preview-idle')).toHaveCount(0)
 
-  // Force the "no servable build" branch. The deterministic template provider
-  // always succeeds, so that path cannot be reached by timing alone; the flag
-  // is the server's word, and this drives the client with it directly.
-  // The body is fetched over the API context rather than route.fetch(),
-  // because reloading the page disposes responses still in flight.
-  await page.route(/\/api\/sessions\/[^/]+$/, async (route) => {
-    const url = route.request().url()
-    if (url.endsWith('/list')) {
-      await route.fallback()
-      return
-    }
-    const upstream = await page.request.get(url)
-    const body = (await upstream.json()) as Record<string, unknown>
-    await route.fulfill({
-      status: upstream.status(),
-      contentType: 'application/json',
-      body: JSON.stringify({ ...body, previewReady: false }),
-    })
-  })
+  // Ready, but the build output is gone: the placeholder replaces the frame.
+  await stubSession(page, { status: 'ready', previewReady: false, events: [] })
   await page.reload()
 
   await expect(page.locator('.preview-idle')).toBeVisible()
