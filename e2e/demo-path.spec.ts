@@ -51,7 +51,9 @@ test('演示路径：登录 → 生成 → 刷新 → 排队 → 取消 → 追�
   })
 
   await test.step('2 新建项目并输入一句需求：时间线按回合分组', async () => {
-    await page.getByRole('button', { name: '新建项目' }).click()
+    // Scoped to the tab: the empty project list also offers a 新建项目 button,
+    // so an unscoped role query is ambiguous.
+    await page.locator('.home-tabs .tab', { hasText: '新建项目' }).click()
     await page.locator('.home-composer textarea').fill(PROMPT)
     await page.getByRole('button', { name: '开始构建' }).click()
     await expect(page.locator('.tl-turn-result').first()).toContainText('本轮完成', {
