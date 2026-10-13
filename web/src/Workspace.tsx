@@ -16,6 +16,20 @@ import ContestPanel from './ContestPanel'
 
 const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主题改成橙色']
 
+// latestReadyBuildSeq returns the seq of the newest 完成 event that produced a
+// servable build, or 0 when the session has no ready build yet. The preview
+// iframe is keyed on builtAt, so this is the only signal allowed to remount it
+// (ticket #26): a build that failed leaves no new version to show.
+function latestReadyBuildSeq(events: SessionEvent[]): number {
+  let seq = 0
+  for (const ev of events) {
+    if (ev.type === 'done' && ((ev.payload?.status as string) ?? 'ready') === 'ready') {
+      seq = Math.max(seq, ev.seq)
+    }
+  }
+  return seq
+}
+
 export default function Workspace({
   sessionId,
   user,
@@ -37,7 +51,18 @@ export default function Workspace({
   const [chatError, setChatError] = useState(false)
   const [reviewVersion, setReviewVersion] = useState('')
   const seenRef = useRef(0)
+  // Highest 完成 event already reflected in the preview. Only a build that
+  // advances past this may remount the iframe, so the 15s reconcile poll can
+  // never interrupt a preview the user is working in (ticket #26).
+  const builtSeqRef = useRef(0)
   const busy = (session?.status ?? 'building') === 'building' || sending
+
+  // markBuilt bumps the preview key only when the build actually advanced.
+  const markBuilt = (seq: number) => {
+    if (seq <= builtSeqRef.current) return
+    builtSeqRef.current = seq
+    setBuiltAt(new Date().toISOString())
+  }
 
   // Load persisted history, then follow the live event stream.
   useEffect(() => {
@@ -53,6 +78,9 @@ export default function Workspace({
         // null; normalize so the timeline never throws mid-setup.
         const persisted = sess.events ?? []
         seenRef.current = persisted.length
+        // A session opened after its build finished must not remount the frame
+        // on the first poll: the preview is already showing that build.
+        builtSeqRef.current = latestReadyBuildSeq(persisted)
         setEvents(persisted)
         source = openEventStream(sessionId, persisted.length)
         source.onmessage = (msg) => {
@@ -62,7 +90,7 @@ export default function Workspace({
           if (ev.type === 'done') {
             const status = ((ev.payload?.status as string) ?? 'ready') as Session['status']
             setSession((prev) => (prev ? { ...prev, status } : prev))
-            if (status === 'ready') setBuiltAt(new Date().toISOString())
+            if (status === 'ready') markBuilt(ev.seq)
           }
           if (ev.type === 'contest' || ev.type === 'score' || ev.type === 'publish' || ev.type === 'done') {
             // Contest progress lives on the session; refetch so the
@@ -91,7 +119,10 @@ export default function Workspace({
                 const missing = persisted.filter((e) => !have.has(e.seq))
                 return missing.length ? [...prev, ...missing] : prev
               })
-              if (sess.status === 'ready') setBuiltAt(new Date().toISOString())
+              // A wedged stream can miss 完成 entirely, so replay it from the
+              // persisted events. markBuilt keeps this to exactly one refresh
+              // per real build instead of one per poll.
+              markBuilt(latestReadyBuildSeq(persisted))
             })
             .catch(() => {})
         }

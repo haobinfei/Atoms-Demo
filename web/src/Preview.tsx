@@ -15,6 +15,12 @@ export default function Preview({
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [reloadKey, setReloadKey] = useState(0)
 
+  // One address drives both the frame and the "open in new tab" link, so the
+  // tab always lands on the version being previewed — including a contest
+  // candidate, whose archived path is already versioned (ticket #26).
+  const base = src ?? `/app/${sessionId}/`
+  const frameSrc = src ? src : `${base}?v=${encodeURIComponent(builtAt)}`
+
   return (
     <div className="preview">
       <div className="preview-bar">
@@ -38,7 +44,7 @@ export default function Preview({
           <button onClick={() => setReloadKey((k) => k + 1)} title="刷新预览">
             刷新
           </button>
-          <a href={`/app/${sessionId}/`} target="_blank" rel="noreferrer" title="在新标签页打开">
+          <a href={base} target="_blank" rel="noreferrer" title="在新标签页打开">
             打开
           </a>
         </div>
@@ -46,7 +52,7 @@ export default function Preview({
       <div className="preview-stage">
         <iframe
           key={`${src ?? 'official'}-${builtAt}-${reloadKey}`}
-          src={src ?? `/app/${sessionId}/?v=${encodeURIComponent(builtAt)}`}
+          src={frameSrc}
           className={device === 'mobile' ? 'frame mobile' : 'frame'}
           title="应用预览"
         />
