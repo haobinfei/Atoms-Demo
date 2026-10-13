@@ -2492,3 +2492,41 @@ select {
      actions; wrapping beats squeezing the row out of shape. */
   .preview-bar { flex-wrap: wrap; gap: var(--sp-2); }
 }
+
+/* ---------- 认证表单：字段级反馈 ---------- */
+.auth-field { display: flex; flex-direction: column; gap: 7px; }
+
+/* The reveal control sits inside the field so it reads as part of the input. */
+.auth-input { position: relative; display: flex; align-items: center; }
+.auth-input input { padding-right: 58px; }
+.auth-reveal {
+  position: absolute;
+  right: 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text-dim);
+  font: inherit;
+  font-size: var(--fs-xs);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.auth-reveal:hover { background: var(--c-surface-2); color: var(--c-accent); }
+
+/* Stated under the field that caused it, not in one banner at the top. */
+.auth-field-error { margin: 0; color: var(--c-danger); font-size: var(--fs-xs); line-height: 1.5; }
+
+/* Live rule state while typing, for the two rules the server enforces. */
+.auth-rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+.auth-rules li::before { content: '○ '; }
+.auth-rules li.is-met { color: var(--c-success); }
+.auth-rules li.is-met::before { content: '● '; }
