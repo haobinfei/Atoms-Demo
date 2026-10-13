@@ -10,10 +10,17 @@ export interface SessionStub {
   // Lets a case move the session out of 构建中 so a follow-up queued behind it
   // can be seen going out.
   setStatus(status: string): void
+  // Replaces the persisted 事件流 the session payload reports.
+  setEvents(events: Record<string, unknown>[]): void
+  // Delivers these events on the next (re)connect of the 事件流, which is how
+  // a 回合 ends without a real server: the client only learns about a 取消回合
+  // (Cancel Turn) from the stream. Later reconnects replay the same seqs,
+  // which the client dedupes.
+  setStream(events: Record<string, unknown>[]): void
 }
 
-// stubSession drives the client with an explicit single-session payload and
-// an empty event stream.
+// stubSession drives the client with an explicit single-session payload and a
+// controllable event stream.
 //
 // Two reasons it is built this way:
 //   - the deterministic template provider always builds successfully, so the
@@ -26,10 +33,11 @@ export interface SessionStub {
 // tests; what is under test here is the client wiring.
 export async function stubSession(page: Page, opts: StubOptions): Promise<SessionStub> {
   let status = opts.status
-  // An empty stream: EventSource retries, but no 完成 event ever arrives to
-  // overwrite the stubbed status.
+  let events = opts.events
+  let stream: Record<string, unknown>[] = []
   await page.route(/\/api\/sessions\/[^/]+\/events/, async (route) => {
-    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' })
+    const body = stream.map((ev) => `data: ${JSON.stringify(ev)}\n\n`).join('')
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body })
   })
   await page.route(/\/api\/sessions\/[^/]+$/, async (route) => {
     const url = route.request().url()
@@ -48,7 +56,7 @@ export async function stubSession(page: Page, opts: StubOptions): Promise<Sessio
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         messages: [],
-        events: opts.events,
+        events,
         previewReady: opts.previewReady,
       }),
     })
@@ -56,6 +64,12 @@ export async function stubSession(page: Page, opts: StubOptions): Promise<Sessio
   return {
     setStatus: (next: string) => {
       status = next
+    },
+    setEvents: (next: Record<string, unknown>[]) => {
+      events = next
+    },
+    setStream: (next: Record<string, unknown>[]) => {
+      stream = next
     },
   }
 }

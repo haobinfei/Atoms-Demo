@@ -9,6 +9,9 @@ export interface TimelineTurn {
   // Paths written during this turn, in the order they were announced.
   files: string[]
   status: 'building' | 'ready' | 'failed'
+  // Set when the user aborted this turn (取消回合). A cancelled turn is 就绪,
+  // not 失败, and its outcome line must not read like a completed build.
+  canceled: boolean
   // Set when the turn ended in failure, so the turn can say where it broke.
   failedStage: string
   failedHint: string
@@ -30,6 +33,7 @@ export function groupTurns(events: SessionEvent[], prompt: string): TimelineTurn
       events: [],
       files: [],
       status: 'building',
+      canceled: false,
       failedStage: '',
       failedHint: '',
     })
@@ -48,6 +52,7 @@ export function groupTurns(events: SessionEvent[], prompt: string): TimelineTurn
       if (path) turn.files.push(path)
     } else if (ev.type === 'done') {
       turn.status = ((ev.payload?.status as string) ?? 'ready') as TimelineTurn['status']
+      turn.canceled = ev.payload?.canceled === true
     } else if (ev.type === 'error') {
       turn.failedStage = (ev.payload?.stage as string) ?? ''
       turn.failedHint = (ev.payload?.hint as string) ?? ''
@@ -58,6 +63,7 @@ export function groupTurns(events: SessionEvent[], prompt: string): TimelineTurn
 
 // summariseTurn states the turn's outcome in one line.
 export function summariseTurn(turn: TimelineTurn): string {
+  if (turn.canceled) return '本轮已取消，保留上一版'
   if (turn.status === 'failed') return '本轮失败'
   if (turn.status === 'building') return '进行中…'
   if (turn.files.length === 0) return '本轮完成'

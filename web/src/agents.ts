@@ -13,6 +13,9 @@ export const PERSONAS: Record<string, Persona> = {
   alex: { id: 'alex', name: 'Alex', role: '工程师', color: '#3b82f6' },
   sarah: { id: 'sarah', name: 'Sarah', role: 'SEO 专家', color: '#14b8a6' },
   nina: { id: 'nina', name: 'Nina', role: '评审', color: '#eab308' },
+  // 取消回合 (Cancel Turn) is the one event the user authors, so it must not
+  // be attributed to a team member.
+  user: { id: 'user', name: '你', role: '', color: '#64748b' },
 }
 
 export function persona(id: string | undefined): Persona {

@@ -333,6 +333,36 @@ func (s *FileStore) SetStatus(owner, id, status string) error {
 	return s.saveLocked(sess)
 }
 
+// RequestCancel appends a 取消回合 (Cancel Turn) request while the session is
+// building. The request is the persisted flag: a Worker on any replica reads
+// it back off the 事件流, so cancel is not a process-local signal (ADR-0013).
+// The status check and the append share one critical section with SetStatus,
+// which is what stops a request that lost the race to the end of a turn from
+// lingering on the stream and cancelling the next one.
+func (s *FileStore) RequestCancel(owner, id string) (Event, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.loadLocked(owner, id)
+	if err != nil {
+		return Event{}, false, err
+	}
+	if sess.Status != "building" {
+		return Event{}, false, nil
+	}
+	ev := Event{
+		Seq:     len(sess.Events) + 1,
+		Type:    CancelEventType,
+		Agent:   "user",
+		At:      time.Now(),
+		Payload: map[string]any{"detail": "用户取消了本回合"},
+	}
+	sess.Events = append(sess.Events, ev)
+	if err := s.saveLocked(sess); err != nil {
+		return Event{}, false, err
+	}
+	return ev, true, nil
+}
+
 // SetJobKind records the in-flight 任务 (Job) kind for crash recovery.
 func (s *FileStore) SetJobKind(owner, id, kind string) error {
 	return s.update(owner, id, func(sess *Session) { sess.Kind = kind })

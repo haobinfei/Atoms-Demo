@@ -392,6 +392,66 @@ func (p *PGStore) SetStatus(owner, id, status string) error {
 	return err
 }
 
+// RequestCancel appends a 取消回合 (Cancel Turn) request while the session is
+// building. SELECT ... FOR UPDATE on the session row is what makes the check
+// and the append one critical section against SetStatus, so a request that
+// lost the race to the end of a 回合 is rejected instead of landing on the
+// stream where it would cancel the *next* turn (ADR-0013).
+//
+// The whole transaction is retried on a seq collision: the 回合's own event
+// appends do not touch the session row, so they can still pick the same seq.
+func (p *PGStore) RequestCancel(owner, id string) (Event, bool, error) {
+	ctx := context.Background()
+	ev := Event{
+		Type:    CancelEventType,
+		Agent:   "user",
+		At:      time.Now(),
+		Payload: map[string]any{"detail": "用户取消了本回合"},
+	}
+	payload, err := json.Marshal(ev.Payload)
+	if err != nil {
+		return Event{}, false, err
+	}
+	for range 5 {
+		appended, ok, err := p.tryRequestCancel(ctx, owner, id, ev, payload)
+		if err == nil {
+			return appended, ok, nil
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			return Event{}, false, err
+		}
+	}
+	return Event{}, false, fmt.Errorf("request cancel: seq contention after retries")
+}
+
+func (p *PGStore) tryRequestCancel(ctx context.Context, owner, id string, ev Event, payload []byte) (Event, bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return Event{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM sessions WHERE owner=$1 AND id=$2 FOR UPDATE`, owner, id).Scan(&status); err != nil {
+		return Event{}, false, err
+	}
+	if status != "building" {
+		return Event{}, false, nil
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO events (session_id, seq, type, agent, payload, at)
+		 SELECT $1, COALESCE((SELECT MAX(seq) FROM events WHERE session_id = $1), 0) + 1, $2, $3, $4, $5
+		 RETURNING seq`, id, ev.Type, ev.Agent, payload, ev.At).Scan(&ev.Seq); err != nil {
+		return Event{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Event{}, false, err
+	}
+	return ev, true, nil
+}
+
 func (p *PGStore) RecordPublish(owner, id, url string) (Publish, error) {
 	ctx := context.Background()
 	tx, err := p.pool.Begin(ctx)
