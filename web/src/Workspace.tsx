@@ -15,8 +15,15 @@ import Preview from './Preview'
 import PublishPanel from './PublishPanel'
 import Timeline from './Timeline'
 import ContestPanel from './ContestPanel'
+import { lastFailure } from './turns'
 
 const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主题改成橙色']
+
+// 工作台分栏 (workspace split): a fixed ratio, collapsible either way. The
+// preview and the conversation compete for the same screen, and which one the
+// user needs changes with what they are doing (ADR-0013's round decided a
+// fixed ratio plus collapse rather than a draggable divider).
+type Layout = 'split' | 'chat' | 'preview'
 
 // latestReadyBuildSeq returns the seq of the newest 完成 event that produced a
 // servable build, or 0 when the session has no ready build yet. The preview
@@ -50,6 +57,13 @@ export default function Workspace({
   const [builtAt, setBuiltAt] = useState('')
   const [filesOpen, setFilesOpen] = useState(false)
   const [publishOpen, setPublishOpen] = useState(false)
+  const [layout, setLayout] = useState<Layout>('split')
+  // 四态 (four states): the workspace always states which one it is in rather
+  // than rendering an ambiguous blank (ticket #34). 加载 and 失败 are settled
+  // by the initial fetch; 断线 follows the event stream.
+  const [loaded, setLoaded] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [offline, setOffline] = useState(false)
   const [chatText, setChatText] = useState('')
   const [sending, setSending] = useState(false)
   const [retrying, setRetrying] = useState(false)
@@ -87,6 +101,7 @@ export default function Workspace({
       .then((sess) => {
         if (cancelled) return
         setSession(sess)
+        setLoaded(true)
         // Sessions saved before the events array existed can carry
         // null; normalize so the timeline never throws mid-setup.
         const persisted = sess.events ?? []
@@ -96,7 +111,10 @@ export default function Workspace({
         builtSeqRef.current = latestReadyBuildSeq(persisted)
         setEvents(persisted)
         source = openEventStream(sessionId, persisted.length)
+        source.onopen = () => setOffline(false)
         source.onmessage = (msg) => {
+          // A delivered event is proof the stream is live again.
+          setOffline(false)
           const ev = JSON.parse(msg.data as string) as SessionEvent
           seenRef.current = Math.max(seenRef.current, ev.seq)
           setEvents((prev) => (prev.some((e) => e.seq === ev.seq) ? prev : [...prev, ev]))
@@ -118,7 +136,10 @@ export default function Workspace({
           }
         }
         source.onerror = () => {
-          // EventSource auto-reconnects; nothing to do.
+          // EventSource auto-reconnects. Surfaced rather than swallowed: a
+          // dropped stream means the timeline has stopped moving, and the
+          // user is owed that explanation (ticket #34).
+          setOffline(true)
         }
 
         // Watchdog: SSE can silently wedge behind proxies — a deploy
@@ -148,9 +169,14 @@ export default function Workspace({
         watchdog = setInterval(reconcile, 15000)
       })
       .catch((err) => {
+        if (cancelled) return
+        setLoaded(true)
         // A 401 means the local session expired mid-use.
         if (isAuthError(err)) redirectToLogin()
-        else console.error('load session failed', err)
+        else {
+          setLoadFailed(true)
+          console.error('load session failed', err)
+        }
       })
 
     return () => {
@@ -275,6 +301,11 @@ export default function Workspace({
     }
   }
 
+  const failure = lastFailure(events)
+  // 加载: the session has not been read yet. Distinct from 空 (read, nothing
+  // happened yet) and from a load that failed outright.
+  const loading = !loaded && !loadFailed
+
   return (
     <div className="workspace">
       <header className="ws-header">
@@ -286,6 +317,28 @@ export default function Workspace({
           <div className={`ws-status ws-status-${session?.status ?? 'building'}`}>{statusLabel}</div>
         </div>
         <div className="ws-actions">
+          {/* 固定比例 + 可折叠: which pane the user needs changes with what
+              they are doing, so each one can take the whole body in one click. */}
+          <div className="ws-layout" role="group" aria-label="布局">
+            {(
+              [
+                ['split', '分栏'],
+                ['chat', '放大对话'],
+                ['preview', '放大预览'],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                className={layout === value ? 'on' : ''}
+                aria-pressed={layout === value}
+                aria-label={label}
+                title={label}
+                onClick={() => setLayout(value)}
+              >
+                {label === '分栏' ? '分栏' : label.slice(2)}
+              </button>
+            ))}
+          </div>
           <span className="ws-user">{user}</span>
           {canPublish && <button disabled={session?.status === 'building'} onClick={() => setPublishOpen(true)}>发布</button>}
           <button onClick={() => setFilesOpen(true)}>代码</button>
@@ -294,144 +347,178 @@ export default function Workspace({
           </a>
         </div>
       </header>
-      <div className="ws-body">
-        <aside className="ws-timeline">
-          <div className="ws-timeline-scroll">
-            <Timeline events={events} prompt={session?.prompt ?? ''} />
-          </div>
-          <div className="ws-chat">
-            {session?.status === 'failed' && (
-              <div className="ws-retry">
-                <span>本回合失败了，可以直接重试，需求与历史都会保留。</span>
-                <button
-                  className="btn btn--primary btn--sm"
-                  disabled={busy || retrying}
-                  onClick={() => void retry()}
-                >
-                  {retrying ? '重试中…' : '重试本回合'}
-                </button>
-              </div>
-            )}
-            {session?.status === 'building' && (
-              <div className="ws-cancel-bar">
-                <span>智能体团队正在生成，取消后会保留上一版。</span>
-                <button
-                  className="btn btn--ghost btn--sm"
-                  disabled={canceling}
-                  onClick={() => void cancel()}
-                >
-                  {canceling ? '取消中…' : '取消本回合'}
-                </button>
-              </div>
-            )}
-            <div className="ws-chips">
-              {QUICK_CHIPS.map((chip) => (
-                <button
-                  key={chip}
-                  className="ws-chip"
-                  disabled={chatText.trim() !== '' && queue.length > 0}
-                  onClick={() => submitChat(chip)}
-                >
-                  {chip}
-                </button>
-              ))}
-            </div>
-            {queue.length > 0 && (
-              <ul className="ws-queue">
-                {queue.map((text, i) => (
-                  <li key={`${i}-${text}`}>
-                    <span className="ws-queue-tag">排队中</span>
-                    <span className="ws-queue-text">{text}</span>
-                    <button
-                      className="ws-queue-send"
-                      disabled={busy}
-                      aria-label={`发送排队消息：${text}`}
-                      onClick={() => sendQueued(i)}
-                    >
-                      发送
-                    </button>
-                    <button
-                      className="ws-queue-drop"
-                      aria-label={`移除排队消息：${text}`}
-                      onClick={() => setQueue((prev) => prev.filter((_, at) => at !== i))}
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <form
-              className="ws-chat-form"
-              onSubmit={(e) => {
-                e.preventDefault()
-                submitChat(chatText)
-              }}
-            >
-              <textarea
-                value={chatText}
-                rows={2}
-                onChange={(e) => setChatText(e.target.value)}
-                onKeyDown={(e) => {
-                  // Enter sends; Shift+Enter is a newline. An IME candidate
-                  // confirmation also arrives as Enter and must never send.
-                  if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
-                  e.preventDefault()
-                  submitChat(chatText)
-                }}
-                placeholder={
-                  busy ? '智能体团队工作中，消息会排队发送…' : '继续描述你想要的变化…'
-                }
-              />
-              <button type="submit" disabled={!chatText.trim()}>
-                发送
-              </button>
-            </form>
-            {chatError && <div className="ws-chat-error">发送失败，请稍后重试</div>}
-          </div>
-        </aside>
-        <main className="ws-preview">
-          {session?.contest && !session.contest.winner ? (
-            <ContestPanel
-              sessionId={sessionId}
-              contest={session.contest}
-              onPicked={(provider) => {
-                setSession((prev) =>
-                  prev?.contest
-                    ? { ...prev, contest: { ...prev.contest, winner: provider } }
-                    : prev,
-                )
-                setBuiltAt(new Date().toISOString())
-              }}
-            />
-          ) : (
-            <>
-              {session?.contest && (
-                <div className="ws-version-bar">
-                  <select value={reviewVersion} onChange={(e) => setReviewVersion(e.target.value)}>
-                    <option value="">
-                      正式版{session.contest.winner ? `（${session.contest.winner}）` : ''}
-                    </option>
-                    {session.contest.entries
-                      .filter((e) => e.status === 'ready' && e.provider !== session.contest?.winner)
-                      .map((e) => (
-                        <option key={e.provider} value={e.provider}>
-                          回看 {e.provider}
-                        </option>
-                      ))}
-                  </select>
+      {loading ? (
+        <div className="ws-state ws-state--loading" role="status">
+          <div className="ws-state-title">正在载入会话…</div>
+          <p className="ws-state-detail">正在读取历史消息与构建状态。</p>
+        </div>
+      ) : loadFailed ? (
+        <div className="ws-state ws-state--failed" role="alert">
+          <div className="ws-state-title">无法载入这个会话</div>
+          <p className="ws-state-detail">可能是网络中断，也可能是会话已被删除。返回首页可以重试。</p>
+          <button className="btn btn--primary btn--sm" onClick={onExit}>
+            返回首页
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* 断线 and 回合失败 are stated above the split so they stay visible
+              whichever pane is maximised. */}
+          {(offline || session?.status === 'failed') && (
+            <div className="ws-notices">
+              {offline && (
+                <div className="ws-state ws-state--offline" role="status">
+                  <div className="ws-state-title">连接已断开，正在自动重连…</div>
+                  <p className="ws-state-detail">已完成的进展不会丢失，恢复后会自动补齐。</p>
                 </div>
               )}
-              <Preview
-                sessionId={sessionId}
-                builtAt={builtAt}
-                ready={session?.previewReady ?? false}
-                src={reviewVersion ? `/app/${sessionId}/contest/${reviewVersion}/` : undefined}
-              />
-            </>
+              {session?.status === 'failed' && (
+                <div className="ws-state ws-state--failed" role="alert">
+                  <div className="ws-state-title">
+                    本轮构建失败{failure.stage ? `：${failure.stage}` : ''}
+                  </div>
+                  <p className="ws-state-detail">
+                    {failure.hint || '重试会从同一个需求与历史重新生成。'}
+                  </p>
+                  <button
+                    className="btn btn--primary btn--sm"
+                    disabled={busy || retrying}
+                    onClick={() => void retry()}
+                  >
+                    {retrying ? '重试中…' : '重试本回合'}
+                  </button>
+                </div>
+              )}
+            </div>
           )}
-        </main>
-      </div>
+          <div className={`ws-body ws-body--${layout}`}>
+            <aside className="ws-timeline">
+              <div className="ws-timeline-scroll">
+                <Timeline events={events} prompt={session?.prompt ?? ''} />
+              </div>
+              <div className="ws-chat">
+                {session?.status === 'building' && (
+                  <div className="ws-cancel-bar">
+                    <span>智能体团队正在生成，取消后会保留上一版。</span>
+                    <button
+                      className="btn btn--ghost btn--sm"
+                      disabled={canceling}
+                      onClick={() => void cancel()}
+                    >
+                      {canceling ? '取消中…' : '取消本回合'}
+                    </button>
+                  </div>
+                )}
+                <div className="ws-chips">
+                  {QUICK_CHIPS.map((chip) => (
+                    <button
+                      key={chip}
+                      className="ws-chip"
+                      disabled={chatText.trim() !== '' && queue.length > 0}
+                      onClick={() => submitChat(chip)}
+                    >
+                      {chip}
+                    </button>
+                  ))}
+                </div>
+                {queue.length > 0 && (
+                  <ul className="ws-queue">
+                    {queue.map((text, i) => (
+                      <li key={`${i}-${text}`}>
+                        <span className="ws-queue-tag">排队中</span>
+                        <span className="ws-queue-text">{text}</span>
+                        <button
+                          className="ws-queue-send"
+                          disabled={busy}
+                          aria-label={`发送排队消息：${text}`}
+                          onClick={() => sendQueued(i)}
+                        >
+                          发送
+                        </button>
+                        <button
+                          className="ws-queue-drop"
+                          aria-label={`移除排队消息：${text}`}
+                          onClick={() => setQueue((prev) => prev.filter((_, at) => at !== i))}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <form
+                  className="ws-chat-form"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    submitChat(chatText)
+                  }}
+                >
+                  <textarea
+                    value={chatText}
+                    rows={2}
+                    onChange={(e) => setChatText(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter sends; Shift+Enter is a newline. An IME candidate
+                      // confirmation also arrives as Enter and must never send.
+                      if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
+                      e.preventDefault()
+                      submitChat(chatText)
+                    }}
+                    placeholder={
+                      busy ? '智能体团队工作中，消息会排队发送…' : '继续描述你想要的变化…'
+                    }
+                  />
+                  <button type="submit" disabled={!chatText.trim()}>
+                    发送
+                  </button>
+                </form>
+                {chatError && <div className="ws-chat-error">发送失败，请稍后重试</div>}
+              </div>
+            </aside>
+            <main className="ws-preview">
+              {session?.contest && !session.contest.winner ? (
+                <ContestPanel
+                  sessionId={sessionId}
+                  contest={session.contest}
+                  onPicked={(provider) => {
+                    setSession((prev) =>
+                      prev?.contest
+                        ? { ...prev, contest: { ...prev.contest, winner: provider } }
+                        : prev,
+                    )
+                    setBuiltAt(new Date().toISOString())
+                  }}
+                />
+              ) : (
+                <>
+                  {session?.contest && (
+                    <div className="ws-version-bar">
+                      <select value={reviewVersion} onChange={(e) => setReviewVersion(e.target.value)}>
+                        <option value="">
+                          正式版{session.contest.winner ? `（${session.contest.winner}）` : ''}
+                        </option>
+                        {session.contest.entries
+                          .filter((e) => e.status === 'ready' && e.provider !== session.contest?.winner)
+                          .map((e) => (
+                            <option key={e.provider} value={e.provider}>
+                              回看 {e.provider}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  )}
+                  <Preview
+                    sessionId={sessionId}
+                    builtAt={builtAt}
+                    ready={session?.previewReady ?? false}
+                    src={reviewVersion ? `/app/${sessionId}/contest/${reviewVersion}/` : undefined}
+                  />
+                </>
+              )}
+            </main>
+          </div>
+        </>
+      )}
       <FilesDrawer sessionId={sessionId} open={filesOpen} onClose={() => setFilesOpen(false)} />
       {publishOpen && (
         <PublishPanel sessionId={sessionId} onClose={() => setPublishOpen(false)} />
