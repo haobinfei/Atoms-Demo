@@ -10,7 +10,9 @@ test('the dashboard cover renders the built app', async ({ page, request }) => {
   await page.getByRole('button', { name: '开始构建' }).click()
   await expect(page.locator('.tl-item.tl-done').first()).toBeVisible({ timeout: 60_000 })
 
+  // 返回首页 lands on the 新建项目 tab, so switch to the project list.
   await page.getByRole('button', { name: '返回首页' }).click()
+  await page.getByRole('button', { name: '我的项目' }).click()
 
   const card = page.locator('.dash-card').first()
   await expect(card.locator('.dash-cover-frame')).toBeVisible()
@@ -33,12 +35,22 @@ test('the workspace states why there is no preview instead of loading an error p
 
   // Force the "no servable build" branch. The deterministic template provider
   // always succeeds, so that path cannot be reached by timing alone; the flag
-  // is the server's word and this drives the client with it directly.
+  // is the server's word, and this drives the client with it directly.
+  // The body is fetched over the API context rather than route.fetch(),
+  // because reloading the page disposes responses still in flight.
   await page.route(/\/api\/sessions\/[^/]+$/, async (route) => {
-    if (route.request().url().endsWith('/list')) return route.fallback()
-    const response = await route.fetch()
-    const body = (await response.json()) as Record<string, unknown>
-    await route.fulfill({ response, json: { ...body, previewReady: false } })
+    const url = route.request().url()
+    if (url.endsWith('/list')) {
+      await route.fallback()
+      return
+    }
+    const upstream = await page.request.get(url)
+    const body = (await upstream.json()) as Record<string, unknown>
+    await route.fulfill({
+      status: upstream.status(),
+      contentType: 'application/json',
+      body: JSON.stringify({ ...body, previewReady: false }),
+    })
   })
   await page.reload()
 
