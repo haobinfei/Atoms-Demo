@@ -1,6 +1,7 @@
 import { Fragment } from 'react'
 import type { SessionEvent } from './api'
 import { persona } from './agents'
+import { groupTurns, summariseTurn, type TimelineTurn } from './turns'
 
 const TYPE_LABEL: Record<string, string> = {
   plan: '制定计划',
@@ -42,20 +43,32 @@ function hintOf(ev: SessionEvent): string {
   return (ev.payload?.hint as string) ?? ''
 }
 
-export default function Timeline({ events, prompt }: { events: SessionEvent[]; prompt: string }) {
+// A turn's file writes collapse into one line: a build announces dozens of
+// paths, and listing them inline buries everything else in the turn.
+function TurnFiles({ files }: { files: string[] }) {
+  if (files.length === 0) return null
   return (
-    <div className="timeline">
-      <div className="tl-user-bubble">{prompt}</div>
-      {events.map((ev, i) => {
-        if (ev.type === 'message') {
-          return (
-            <div key={ev.seq} className="tl-user-bubble">
-              {((ev.payload?.content as string) ?? '')}
-            </div>
-          )
-        }
+    <details className="tl-files">
+      <summary>修改了 {files.length} 个文件</summary>
+      <ul>
+        {files.map((path) => (
+          <li key={path}>
+            <code>{path}</code>
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
+function TurnBody({ turn }: { turn: TimelineTurn }) {
+  return (
+    <>
+      {turn.events.map((ev, i) => {
+        // Rendered once by TurnFiles instead of one row per path.
+        if (ev.type === 'file') return null
         const who = persona(ev.agent)
-        const prev = i > 0 ? events[i - 1] : null
+        const prev = i > 0 ? turn.events[i - 1] : null
         const showHeader = !prev || prev.agent !== ev.agent
         return (
           <Fragment key={ev.seq}>
@@ -77,18 +90,39 @@ export default function Timeline({ events, prompt }: { events: SessionEvent[]; p
                   {hintOf(ev) && <p className="tl-hint">{hintOf(ev)}</p>}
                 </>
               ) : (
-                <>
-                  {ev.type === 'file' && <code className="tl-path">{detail(ev)}</code>}
-                  {ev.type !== 'file' && detail(ev) && <span className="tl-detail">{detail(ev)}</span>}
-                </>
+                detail(ev) && <span className="tl-detail">{detail(ev)}</span>
               )}
             </div>
           </Fragment>
         )
       })}
-      {events.length > 0 && events[events.length - 1].type !== 'done' && (
-        <div className="tl-typing">智能体团队工作中…</div>
-      )}
+      <TurnFiles files={turn.files} />
+    </>
+  )
+}
+
+// Timeline renders the 事件流 as 回合 rather than as one flat list, so a
+// session that has been revised several times still reads as "here is what I
+// asked for, here is what changed".
+export default function Timeline({ events, prompt }: { events: SessionEvent[]; prompt: string }) {
+  const turns = groupTurns(events, prompt)
+  return (
+    <div className="timeline">
+      {turns.map((turn, i) => (
+        <section className="tl-turn" key={turn.key}>
+          <div className="tl-turn-head">
+            <span className="tl-turn-index">第 {i + 1} 回合</span>
+            <div className="tl-user-bubble">{turn.goal}</div>
+          </div>
+          <div className="tl-turn-body">
+            <TurnBody turn={turn} />
+            {turn.status === 'building' && <div className="tl-typing">智能体团队工作中…</div>}
+          </div>
+          <div className={`tl-turn-result tl-turn-result--${turn.status}`}>
+            {summariseTurn(turn)}
+          </div>
+        </section>
+      ))}
     </div>
   )
 }
