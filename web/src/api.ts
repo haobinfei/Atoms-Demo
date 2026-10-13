@@ -54,6 +54,10 @@ export interface Session {
   events: SessionEvent[]
   messages: ChatMessage[]
   contest?: Contest
+  // The in-flight 任务 (Job) kind while status is "building" (turn | contest |
+  // publish). It is how the client tells a 发布 apart from a 回合.
+  kind?: string
+  publishes?: Publish[]
   // Derived server-side per request: whether /app/{id}/ currently has a
   // servable build. A rendering hint only, never an authorization signal.
   previewReady: boolean
@@ -253,29 +257,16 @@ export interface Publish {
   version: number
   url: string
   at: string
+  unpublished?: boolean
 }
 
-export async function publishSession(id: string): Promise<Publish> {
-  const before = await getPublishes(id).catch(() => [] as Publish[])
+// startPublish claims the session and puts the rebuild on a Worker, returning
+// as soon as the server has accepted it (202). The new version is recorded
+// later — so this deliberately has no deadline: a slow build is not a failure,
+// and treating it as one invites a duplicate 发布.
+export async function startPublish(id: string): Promise<void> {
   const resp = await fetch(`/api/sessions/${id}/publish`, { method: 'POST' })
   if (!resp.ok) throw new Error(`publish: ${resp.status}`)
-  // The rebuild runs on a Worker and returns 202 immediately; poll the
-  // history until the new version lands (or the deadline passes).
-  const want = before.length + 1
-  const deadline = Date.now() + 15000
-  while (Date.now() < deadline) {
-    const list = await getPublishes(id)
-    if (list.length >= want) return list[list.length - 1]
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  throw new Error('publish: timed out waiting for the new version')
-}
-
-export async function getPublishes(id: string): Promise<Publish[]> {
-  const resp = await fetch(`/api/sessions/${id}/publish`)
-  if (!resp.ok) throw new Error(`get publishes: ${resp.status}`)
-  const data = (await resp.json()) as { publishes: Publish[] }
-  return data.publishes
 }
 
 export async function getPublishState(id: string): Promise<{ publishes: Publish[]; published: boolean }> {

@@ -5,6 +5,7 @@ export default function Preview({
   builtAt,
   src,
   ready = true,
+  published = false,
 }: {
   sessionId: string
   // Changes after every successful build; used as the iframe key so the
@@ -16,6 +17,10 @@ export default function Preview({
   // mounted until there is one, so a session without a build shows a stated
   // placeholder instead of loading an error page (ADR-0014).
   ready?: boolean
+  // Whether the newest 发布 (Publish) is still publicly reachable. The frame
+  // always shows the draft build, which is the same bytes as the published one
+  // right after a publish — and diverges as soon as another 回合 runs.
+  published?: boolean
 }) {
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [reloadKey, setReloadKey] = useState(0)
@@ -34,21 +39,28 @@ export default function Preview({
   return (
     <div className="preview">
       <div className="preview-bar">
-        <div className="device-toggle">
-          <button
-            className={device === 'desktop' ? 'on' : ''}
-            onClick={() => setDevice('desktop')}
-            title="桌面视口"
-          >
-            桌面
-          </button>
-          <button
-            className={device === 'mobile' ? 'on' : ''}
-            onClick={() => setDevice('mobile')}
-            title="移动视口"
-          >
-            移动
-          </button>
+        <div className="preview-bar-left">
+          <div className="device-toggle">
+            <button
+              className={device === 'desktop' ? 'on' : ''}
+              onClick={() => setDevice('desktop')}
+              title="桌面视口"
+            >
+              桌面
+            </button>
+            <button
+              className={device === 'mobile' ? 'on' : ''}
+              onClick={() => setDevice('mobile')}
+              title="移动视口"
+            >
+              移动
+            </button>
+          </div>
+          {/* 草稿版 vs 已发布版: the frame is always the draft build, and the
+              two only coincide right after a 发布. */}
+          <span className={`preview-badge preview-badge--${published ? 'published' : 'draft'}`}>
+            {published ? '已发布版' : '草稿版'}
+          </span>
         </div>
         <div className="preview-actions">
           <button onClick={() => setReloadKey((k) => k + 1)} disabled={!ready} title="刷新预览">

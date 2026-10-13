@@ -305,6 +305,10 @@ export default function Workspace({
   // 加载: the session has not been read yet. Distinct from 空 (read, nothing
   // happened yet) and from a load that failed outright.
   const loading = !loaded && !loadFailed
+  // The newest 发布 is still publicly reachable. The frame itself always shows
+  // the draft build, which is what the badge is there to make explicit.
+  const publishes = session?.publishes ?? []
+  const published = publishes.length > 0 && !publishes[publishes.length - 1].unpublished
 
   return (
     <div className="workspace">
@@ -511,6 +515,7 @@ export default function Workspace({
                     sessionId={sessionId}
                     builtAt={builtAt}
                     ready={session?.previewReady ?? false}
+                    published={published}
                     src={reviewVersion ? `/app/${sessionId}/contest/${reviewVersion}/` : undefined}
                   />
                 </>
