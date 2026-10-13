@@ -53,7 +53,7 @@ test('prompt → interactive preview → chat turn → public app → unpublish'
   )
 
   // 发起修改回合。
-  await page.locator('.ws-chat-form input').fill('把主题色换成绿色，加一句标语')
+  await page.locator('.ws-chat-form textarea').fill('把主题色换成绿色，加一句标语')
   await page.locator('.ws-chat-form button[type="submit"]').click()
   await expect(page.locator('.tl-user-bubble', { hasText: '把主题色换成绿色' })).toBeVisible()
 
