@@ -1673,7 +1673,9 @@ select {
 .dash-cover-frame {
   position: absolute;
   inset: 0;
-  background: #fff;
+  display: grid;
+  place-items: center;
+  background: var(--c-surface-1);
 }
 
 .dash-cover-frame iframe {
@@ -1682,6 +1684,20 @@ select {
   border: 0;
   pointer-events: none;
   transform: scale(1.01);
+  /* Hold the frame invisible until it has painted, so the loading note is
+     replaced by the app rather than by a blank white box. */
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.dash-cover-frame.is-loaded iframe {
+  opacity: 1;
+}
+
+.dash-cover-loading {
+  position: absolute;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
 }
 
 .dash-cover-live {
@@ -1827,8 +1843,37 @@ select {
 }
 
 .preview-stage {
+  position: relative;
   background: var(--c-surface-1);
   box-shadow: inset 0 1px 0 var(--c-border);
+}
+
+/* Shown while the frame has not painted yet; the stage stays visible behind
+   it, so a slow build never looks like a broken preview. */
+.preview-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  font-size: var(--fs-sm);
+  color: var(--c-text-dim);
+}
+
+/* Shown instead of the frame when the server reports no servable build. */
+.preview-idle {
+  flex: 1;
+  max-width: 1200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--c-border-strong);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
 }
 
 .frame {

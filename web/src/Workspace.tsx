@@ -259,6 +259,7 @@ export default function Workspace({
               <Preview
                 sessionId={sessionId}
                 builtAt={builtAt}
+                ready={session?.previewReady ?? false}
                 src={reviewVersion ? `/app/${sessionId}/contest/${reviewVersion}/` : undefined}
               />
             </>

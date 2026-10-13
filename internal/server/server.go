@@ -476,6 +476,30 @@ func (s *Server) workspaceDir(user, id string) (string, error) {
 	return s.store.Workspace(user, id), nil
 }
 
+// previewReady reports whether /app/{id}/ currently has a servable build.
+// It resolves the same source handleApp serves from — the Artifact Store
+// current pointer when COS is configured, otherwise the local dist — so the
+// client can decide whether to render a preview at all instead of loading an
+// error page and falling back after the fact (ADR-0014).
+//
+// This is a derived read: nothing is stored, and it must never be treated as
+// an authorization signal. Whether a caller may see the app is decided in
+// handleApp, not here.
+func (s *Server) previewReady(owner, id string) bool {
+	if s.artifacts != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, ok, err := s.artifacts.Current(ctx, artifact.SessionPrefix(id))
+		return err == nil && ok
+	}
+	ws, err := s.workspaceDir(owner, id)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(ws, "dist", "index.html"))
+	return err == nil
+}
+
 // appDir returns the session's generated-app directory.
 func (s *Server) appDir(user, id string) (string, error) {
 	ws, err := s.workspaceDir(user, id)
@@ -881,12 +905,19 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.store.Load(s.requestWorkspaceID(r), r.PathValue("id"))
+	owner := s.requestWorkspaceID(r)
+	sess, err := s.store.Load(owner, r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, sess)
+	// previewReady is derived per request, so it is added as a view field
+	// rather than a field on the persisted Session (ADR-0014).
+	type sessionView struct {
+		*session.Session
+		PreviewReady bool `json:"previewReady"`
+	}
+	writeJSON(w, http.StatusOK, sessionView{Session: sess, PreviewReady: s.previewReady(owner, sess.ID)})
 }
 
 // enqueueJob puts a 任务 (Job) on the Queue. The work then runs on a Worker,
@@ -921,13 +952,14 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type summary struct {
-		ID        string    `json:"id"`
-		Name      string    `json:"name"`
-		Category  string    `json:"category"`
-		Status    string    `json:"status"`
-		Pinned    bool      `json:"pinned"`
-		Prompt    string    `json:"prompt"`
-		UpdatedAt time.Time `json:"updatedAt"`
+		ID           string    `json:"id"`
+		Name         string    `json:"name"`
+		Category     string    `json:"category"`
+		Status       string    `json:"status"`
+		Pinned       bool      `json:"pinned"`
+		Prompt       string    `json:"prompt"`
+		UpdatedAt    time.Time `json:"updatedAt"`
+		PreviewReady bool      `json:"previewReady"`
 	}
 	out := make([]summary, 0, len(sessions))
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -938,7 +970,8 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		out = append(out, summary{
 			ID: sess.ID, Name: sess.Name, Category: sess.Category,
 			Status: sess.Status, Pinned: sess.Pinned, Prompt: sess.Prompt,
-			UpdatedAt: sess.UpdatedAt,
+			UpdatedAt:    sess.UpdatedAt,
+			PreviewReady: s.previewReady(user, sess.ID),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})

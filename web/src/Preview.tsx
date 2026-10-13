@@ -4,6 +4,7 @@ export default function Preview({
   sessionId,
   builtAt,
   src,
+  ready = true,
 }: {
   sessionId: string
   // Changes after every successful build; used as the iframe key so the
@@ -11,15 +12,24 @@ export default function Preview({
   builtAt: string
   // Optional override, e.g. a contest loser's archived version.
   src?: string
+  // Derived server-side: is there a build for /app to serve? The frame is not
+  // mounted until there is one, so a session without a build shows a stated
+  // placeholder instead of loading an error page (ADR-0014).
+  ready?: boolean
 }) {
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [reloadKey, setReloadKey] = useState(0)
+  // Which frame key has finished loading. Keyed rather than boolean so a new
+  // build (or a manual refresh) shows the loading state again.
+  const [loadedKey, setLoadedKey] = useState('')
 
   // One address drives both the frame and the "open in new tab" link, so the
   // tab always lands on the version being previewed — including a contest
   // candidate, whose archived path is already versioned (ticket #26).
   const base = src ?? `/app/${sessionId}/`
   const frameSrc = src ? src : `${base}?v=${encodeURIComponent(builtAt)}`
+  const frameKey = `${src ?? 'official'}-${builtAt}-${reloadKey}`
+  const loading = ready && loadedKey !== frameKey
 
   return (
     <div className="preview">
@@ -41,7 +51,7 @@ export default function Preview({
           </button>
         </div>
         <div className="preview-actions">
-          <button onClick={() => setReloadKey((k) => k + 1)} title="刷新预览">
+          <button onClick={() => setReloadKey((k) => k + 1)} disabled={!ready} title="刷新预览">
             刷新
           </button>
           <a href={base} target="_blank" rel="noreferrer" title="在新标签页打开">
@@ -50,12 +60,20 @@ export default function Preview({
         </div>
       </div>
       <div className="preview-stage">
-        <iframe
-          key={`${src ?? 'official'}-${builtAt}-${reloadKey}`}
-          src={frameSrc}
-          className={device === 'mobile' ? 'frame mobile' : 'frame'}
-          title="应用预览"
-        />
+        {ready ? (
+          <>
+            {loading && <div className="preview-loading">预览加载中…</div>}
+            <iframe
+              key={frameKey}
+              src={frameSrc}
+              className={device === 'mobile' ? 'frame mobile' : 'frame'}
+              title="应用预览"
+              onLoad={() => setLoadedKey(frameKey)}
+            />
+          </>
+        ) : (
+          <div className="preview-idle">应用产出构建结果后，这里会显示预览。</div>
+        )}
       </div>
     </div>
   )
