@@ -357,6 +357,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/duplicate", s.handleDuplicate)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDelete)
 	mux.HandleFunc("POST /api/sessions/{id}/chat", s.handleChat)
+	mux.HandleFunc("POST /api/sessions/{id}/retry", s.handleRetry)
 	mux.HandleFunc("POST /api/sessions/{id}/winner", s.handleWinner)
 	mux.HandleFunc("POST /api/sessions/{id}/publish", s.handlePublish)
 	mux.HandleFunc("POST /api/sessions/{id}/unpublish", s.handleUnpublish)
@@ -1091,6 +1092,45 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// timeline (it was persisted before the enqueue); a retry appends the
 		// follow-up again, the documented at-least-once tradeoff.
 		slog.Error("enqueue chat turn", "session", id, "err", err)
+		_ = s.store.SetStatus(user, id, prev)
+		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
+}
+
+// handleRetry re-runs the last 回合 after it failed. It appends no message:
+// the requirement and the whole history are already on the session, so the
+// turn regenerates from exactly the inputs that failed. It reuses BeginTurn
+// and the ordinary enqueue path, so a retry cannot start a second pipeline
+// beside a running one.
+func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	user := s.requestWorkspaceID(r)
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	prev, ok, err := s.store.BeginTurn(user, id, string(jobqueue.KindTurn))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
+		return
+	}
+	if prev != "failed" {
+		// Nothing to retry. Release the claim so the session is not stuck
+		// "building" with no pipeline owning it.
+		_ = s.store.SetStatus(user, id, prev)
+		writeError(w, http.StatusConflict, "only a failed turn can be retried")
+		return
+	}
+	if err := s.enqueueJob(user, id, jobqueue.KindTurn); err != nil {
+		// Queue full / Redis down: roll back so the next request is not
+		// rejected forever.
+		slog.Error("enqueue retry turn", "session", id, "err", err)
 		_ = s.store.SetStatus(user, id, prev)
 		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
 		return

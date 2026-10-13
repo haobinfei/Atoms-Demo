@@ -16,9 +16,30 @@ const TYPE_LABEL: Record<string, string> = {
   agent: '工作中',
 }
 
+const STAGE_LABEL: Record<string, string> = {
+  plan: '需求拆解',
+  spec: '产品规格',
+  architecture: '架构设计',
+  generate: '代码生成',
+  write: '文件写入',
+  build: '构建',
+}
+
 function detail(ev: SessionEvent): string {
   const p = ev.payload ?? {}
   return (p.detail as string) ?? (p.path as string) ?? (p.message as string) ?? ''
+}
+
+// Where the turn broke, in words the user can place.
+function stageOf(ev: SessionEvent): string {
+  const stage = (ev.payload?.stage as string) ?? ''
+  if (!stage) return ''
+  return STAGE_LABEL[stage] ?? stage
+}
+
+// What to do about it. The raw provider error is not actionable on its own.
+function hintOf(ev: SessionEvent): string {
+  return (ev.payload?.hint as string) ?? ''
 }
 
 export default function Timeline({ events, prompt }: { events: SessionEvent[]; prompt: string }) {
@@ -49,8 +70,18 @@ export default function Timeline({ events, prompt }: { events: SessionEvent[]; p
             )}
             <div className={`tl-item tl-${ev.type}`}>
               <span className="tl-type">{TYPE_LABEL[ev.type] ?? ev.type}</span>
-              {ev.type === 'file' && <code className="tl-path">{detail(ev)}</code>}
-              {ev.type !== 'file' && detail(ev) && <span className="tl-detail">{detail(ev)}</span>}
+              {ev.type === 'error' ? (
+                <>
+                  {stageOf(ev) && <span className="tl-stage">失败阶段：{stageOf(ev)}</span>}
+                  {detail(ev) && <span className="tl-detail">{detail(ev)}</span>}
+                  {hintOf(ev) && <p className="tl-hint">{hintOf(ev)}</p>}
+                </>
+              ) : (
+                <>
+                  {ev.type === 'file' && <code className="tl-path">{detail(ev)}</code>}
+                  {ev.type !== 'file' && detail(ev) && <span className="tl-detail">{detail(ev)}</span>}
+                </>
+              )}
             </div>
           </Fragment>
         )

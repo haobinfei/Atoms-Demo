@@ -5,6 +5,7 @@ import {
   isAuthError,
   openEventStream,
   redirectToLogin,
+  retrySession,
   type Session,
   type SessionEvent,
 } from './api'
@@ -48,6 +49,7 @@ export default function Workspace({
   const [publishOpen, setPublishOpen] = useState(false)
   const [chatText, setChatText] = useState('')
   const [sending, setSending] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const [chatError, setChatError] = useState(false)
   const [reviewVersion, setReviewVersion] = useState('')
   const seenRef = useRef(0)
@@ -167,6 +169,29 @@ export default function Workspace({
     }
   }
 
+  // Re-runs the failed 回合 from the same requirement and history. No message
+  // is sent, so nothing is duplicated on the timeline (ticket #30).
+  async function retry() {
+    if (busy || retrying) return
+    setRetrying(true)
+    setChatError(false)
+    try {
+      await retrySession(sessionId)
+      // Flip immediately: the retry re-enters the ordinary turn path, so what
+      // follows is the same event sequence a chat turn produces.
+      setSession((prev) => (prev ? { ...prev, status: 'building' } : prev))
+    } catch (err) {
+      if (isAuthError(err)) {
+        redirectToLogin()
+        return
+      }
+      setChatError(true)
+      console.error('retry turn failed', err)
+    } finally {
+      setRetrying(false)
+    }
+  }
+
   return (
     <div className="workspace">
       <header className="ws-header">
@@ -192,6 +217,18 @@ export default function Workspace({
             <Timeline events={events} prompt={session?.prompt ?? ''} />
           </div>
           <div className="ws-chat">
+            {session?.status === 'failed' && (
+              <div className="ws-retry">
+                <span>本回合失败了，可以直接重试，需求与历史都会保留。</span>
+                <button
+                  className="btn btn--primary btn--sm"
+                  disabled={busy || retrying}
+                  onClick={() => void retry()}
+                >
+                  {retrying ? '重试中…' : '重试本回合'}
+                </button>
+              </div>
+            )}
             <div className="ws-chips">
               {QUICK_CHIPS.map((chip) => (
                 <button
