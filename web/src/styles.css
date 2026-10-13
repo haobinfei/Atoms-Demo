@@ -26,6 +26,12 @@
   --c-danger: #ef4444;
   --c-danger-soft: rgba(239, 68, 68, 0.12);
 
+  /* 源码着色（读代码用；浅色主题需给出对应的一组值） */
+  --c-code-comment: #7f8a9c;
+  --c-code-string: #9ccc9c;
+  --c-code-number: #e0a86b;
+  --c-code-keyword: #c39ce0;
+
   /* 字阶 */
   --fs-xs: 12px;
   --fs-sm: 13px;
@@ -2530,3 +2536,64 @@ select {
 .auth-rules li::before { content: '○ '; }
 .auth-rules li.is-met { color: var(--c-success); }
 .auth-rules li.is-met::before { content: '● '; }
+
+/* ---------- 代码抽屉：搜索、行号与着色 ---------- */
+/* The search box lives above the list, so the column owns the divider and the
+   scrolling rather than the list itself. */
+.fd-side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--c-border); }
+.fd-list { border-right: 0; flex: 1; }
+
+.fd-search {
+  flex: none;
+  margin: 8px 8px 4px;
+  min-height: 34px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-3);
+  color: var(--c-text);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  outline: none;
+}
+.fd-search:focus { border-color: var(--c-accent); box-shadow: 0 0 0 2px var(--c-accent-soft); }
+.fd-no-match { margin: 10px; color: var(--c-text-muted); font-size: var(--fs-xs); line-height: 1.6; }
+
+.fd-code {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+  color: var(--c-text);
+}
+/* min-height keeps blank lines at their real height, so the gutter and the
+   code stay aligned even through multi-line comments and template strings. */
+.fd-line { display: flex; gap: 12px; padding-right: 14px; min-height: 1.65em; }
+.fd-line:hover { background: var(--c-surface-2); }
+.fd-line-no {
+  flex: none;
+  width: 46px;
+  text-align: right;
+  color: var(--c-text-muted);
+  user-select: none;
+}
+.fd-line-text { white-space: pre; }
+
+.tok-comment { color: var(--c-code-comment); font-style: italic; }
+.tok-string { color: var(--c-code-string); }
+.tok-number { color: var(--c-code-number); }
+.tok-keyword { color: var(--c-code-keyword); }
+
+.fd-error {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-6);
+  text-align: center;
+  color: var(--c-text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+}
