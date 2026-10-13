@@ -9,6 +9,21 @@ import {
 } from './api'
 
 type Mode = 'login' | 'register' | 'verify' | 'forgot' | 'reset'
+// Field-level messages, so a mistake is stated next to the field that caused
+// it instead of only as one form-wide banner.
+type FieldErrors = { email?: string; password?: string; confirm?: string }
+
+const PASSWORD_MIN = 12
+// The server refuses a resend storm for the same reason it rate-limits login;
+// the button says how long rather than silently doing nothing.
+const RESEND_COOLDOWN = 60
+
+// Mirrors the server's rule (internal/identity/identity.go: validEmail) so the
+// client never rejects an address the server would accept.
+function emailLooksValid(value: string): boolean {
+  const at = value.indexOf('@')
+  return at > 0 && at < value.length - 3 && !/\s/.test(value)
+}
 
 export default function Auth({ onLogin }: { onLogin: () => Promise<void> }) {
   const params = new URLSearchParams(location.search)
@@ -21,6 +36,15 @@ export default function Auth({ onLogin }: { onLogin: () => Promise<void> }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
+  const [reveal, setReveal] = useState(false)
+  const [cooldown, setCooldown] = useState(0)
+
+  useEffect(() => {
+    if (cooldown <= 0) return
+    const timer = setTimeout(() => setCooldown(cooldown - 1), 1000)
+    return () => clearTimeout(timer)
+  }, [cooldown])
 
   useEffect(() => {
     if (!verificationToken) return
@@ -39,16 +63,43 @@ export default function Auth({ onLogin }: { onLogin: () => Promise<void> }) {
     setMode(next)
     setError('')
     setNotice('')
+    setFieldErrors({})
     setPassword('')
     setConfirm('')
     if (next !== 'reset') history.replaceState(null, '', '/')
   }
 
+  // Client-side only for the two rules the server actually enforces: a
+  // well-formed address and a long enough password. A length rule measured in
+  // characters is never looser than the server's byte count.
+  function validate(): FieldErrors {
+    const next: FieldErrors = {}
+    if (mode !== 'reset') {
+      const mail = email.trim()
+      if (!mail) next.email = '请填写邮箱。'
+      else if (!emailLooksValid(mail)) next.email = '这个邮箱地址看起来不完整。'
+    }
+    if (mode === 'login' || mode === 'register' || mode === 'reset') {
+      if (!password) next.password = '请填写密码。'
+      else if (mode !== 'login' && [...password].length < PASSWORD_MIN) {
+        next.password = `密码至少需要 ${PASSWORD_MIN} 个字符，当前 ${[...password].length} 个。`
+      }
+    }
+    if (mode === 'register' || mode === 'reset') {
+      if (!confirm) next.confirm = '请再输入一次密码。'
+      else if (confirm !== password) next.confirm = '两次输入的密码不一致。'
+    }
+    return next
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
-    if ((mode === 'register' || mode === 'reset') && password !== confirm) {
-      setError('两次输入的密码不一致。')
+    const problems = validate()
+    setFieldErrors(problems)
+    if (Object.keys(problems).length > 0) {
+      setError('')
+      setNotice('')
       return
     }
     setBusy(true)
@@ -61,9 +112,11 @@ export default function Auth({ onLogin }: { onLogin: () => Promise<void> }) {
       } else if (mode === 'register') {
         await register(email.trim(), password)
         setMode('verify')
+        setCooldown(RESEND_COOLDOWN)
         setNotice('验证邮件请求已受理。请查看邮箱及垃圾邮件；未收到时可稍后重新发送。')
       } else if (mode === 'verify') {
         await resendVerification(email.trim())
+        setCooldown(RESEND_COOLDOWN)
         setNotice('验证邮件请求已受理。请查看邮箱及垃圾邮件；未收到时可稍后重新发送。')
       } else if (mode === 'forgot') {
         await forgotPassword(email.trim())
@@ -93,6 +146,10 @@ export default function Auth({ onLogin }: { onLogin: () => Promise<void> }) {
     reset: '重置密码',
   }
 
+  const passwordLongEnough = [...password].length >= PASSWORD_MIN
+  const passwordsMatch = confirm.length > 0 && confirm === password
+  const showRules = mode === 'register' || mode === 'reset'
+
   return (
     <main className="auth-page">
       <aside className="auth-brand">
@@ -110,29 +167,110 @@ export default function Auth({ onLogin }: { onLogin: () => Promise<void> }) {
         {mode === 'verify' && <p className="auth-description">验证后即可进入个人工作区。没有收到邮件时可重新发送。</p>}
         {mode === 'forgot' && <p className="auth-description">输入注册邮箱，我们将发送密码重置链接。</p>}
         {mode === 'reset' && <p className="auth-description">设置新密码后，所有设备的登录会话将失效，请重新登录。</p>}
-        <form className="auth-form" onSubmit={(event) => void submit(event)}>
+        <form className="auth-form" onSubmit={(event) => void submit(event)} noValidate>
           {mode !== 'reset' && (
-            <label>
-              邮箱
-              <input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
-            </label>
+            <div className="auth-field">
+              <label htmlFor="auth-email">邮箱</label>
+              <input
+                id="auth-email"
+                type="email"
+                autoComplete="email"
+                aria-invalid={fieldErrors.email ? true : undefined}
+                aria-describedby={fieldErrors.email ? 'auth-email-error' : undefined}
+                value={email}
+                onChange={(event) => {
+                  setEmail(event.target.value)
+                  if (fieldErrors.email) setFieldErrors((prev) => ({ ...prev, email: undefined }))
+                }}
+              />
+              {fieldErrors.email && (
+                <p className="auth-field-error" id="auth-email-error">
+                  {fieldErrors.email}
+                </p>
+              )}
+            </div>
           )}
           {(mode === 'login' || mode === 'register' || mode === 'reset') && (
-            <label>
-              {mode === 'login' ? '密码' : '密码（至少 12 位）'}
-              <input type="password" minLength={mode === 'login' ? undefined : 12} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required value={password} onChange={(event) => setPassword(event.target.value)} />
-            </label>
+            <div className="auth-field">
+              <label htmlFor="auth-password">{mode === 'login' ? '密码' : `密码（至少 ${PASSWORD_MIN} 位）`}</label>
+              <div className="auth-input">
+                <input
+                  id="auth-password"
+                  type={reveal ? 'text' : 'password'}
+                  autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                  aria-invalid={fieldErrors.password ? true : undefined}
+                  aria-describedby={fieldErrors.password ? 'auth-password-error' : undefined}
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value)
+                    if (fieldErrors.password) setFieldErrors((prev) => ({ ...prev, password: undefined }))
+                  }}
+                />
+                <button
+                  type="button"
+                  className="auth-reveal"
+                  aria-label={reveal ? '隐藏密码' : '显示密码'}
+                  aria-pressed={reveal}
+                  onClick={() => setReveal((on) => !on)}
+                >
+                  {reveal ? '隐藏' : '显示'}
+                </button>
+              </div>
+              {fieldErrors.password && (
+                <p className="auth-field-error" id="auth-password-error">
+                  {fieldErrors.password}
+                </p>
+              )}
+            </div>
           )}
           {(mode === 'register' || mode === 'reset') && (
-            <label>
-              确认密码
-              <input type="password" minLength={12} autoComplete="new-password" required value={confirm} onChange={(event) => setConfirm(event.target.value)} />
-            </label>
+            <div className="auth-field">
+              <label htmlFor="auth-confirm">确认密码</label>
+              <input
+                id="auth-confirm"
+                type={reveal ? 'text' : 'password'}
+                autoComplete="new-password"
+                aria-invalid={fieldErrors.confirm ? true : undefined}
+                aria-describedby={fieldErrors.confirm ? 'auth-confirm-error' : undefined}
+                value={confirm}
+                onChange={(event) => {
+                  setConfirm(event.target.value)
+                  if (fieldErrors.confirm) setFieldErrors((prev) => ({ ...prev, confirm: undefined }))
+                }}
+              />
+              {fieldErrors.confirm && (
+                <p className="auth-field-error" id="auth-confirm-error">
+                  {fieldErrors.confirm}
+                </p>
+              )}
+            </div>
+          )}
+          {showRules && (
+            <ul className="auth-rules" aria-live="polite">
+              <li className={passwordLongEnough ? 'is-met' : ''}>至少 {PASSWORD_MIN} 个字符</li>
+              <li className={passwordsMatch ? 'is-met' : ''}>两次输入一致</li>
+            </ul>
           )}
           {error && <div className="auth-alert" role="alert">{error}</div>}
           {notice && <div className="auth-notice" role="status">{notice}</div>}
-          <button className="primary-action" type="submit" disabled={busy || (mode === 'reset' && !resetToken)}>
-            {busy ? '请稍候…' : mode === 'login' ? '登录' : mode === 'register' ? '注册' : mode === 'verify' ? '重新发送验证邮件' : mode === 'forgot' ? '发送重置链接' : '重置密码'}
+          <button
+            className="primary-action"
+            type="submit"
+            disabled={busy || (mode === 'reset' && !resetToken) || (mode === 'verify' && cooldown > 0)}
+          >
+            {busy
+              ? '请稍候…'
+              : mode === 'login'
+                ? '登录'
+                : mode === 'register'
+                  ? '注册'
+                  : mode === 'verify'
+                    ? cooldown > 0
+                      ? `${cooldown} 秒后可重发`
+                      : '重新发送验证邮件'
+                    : mode === 'forgot'
+                      ? '发送重置链接'
+                      : '重置密码'}
           </button>
         </form>
         <div className="auth-links">

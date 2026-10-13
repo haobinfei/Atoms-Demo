@@ -230,7 +230,11 @@ export function isAuthError(e: unknown): boolean {
 }
 
 export function redirectToLogin(): void {
-  window.location.href = '/'
+  // Carry the 项目 the user was in. App reads ?s= on load, so an expired
+  // session comes back to that 项目 instead of the home screen — and if it is
+  // gone or not theirs, the workspace says so rather than showing a blank.
+  const id = new URLSearchParams(location.search).get('s')
+  window.location.href = id ? `/?s=${encodeURIComponent(id)}` : '/'
 }
 
 export async function chatSession(id: string, message: string): Promise<void> {
