@@ -225,6 +225,11 @@ export async function chatSession(id: string, message: string): Promise<void> {
   if (!resp.ok) throw new Error(`chat: ${resp.status}`)
 }
 
+// Re-runs the last 回合 after it failed. The requirement and history are
+// already on the session, so no message is sent.
+export const retrySession = (id: string) =>
+  apiRequest(`/api/sessions/${encodeURIComponent(id)}/retry`, 'POST')
+
 export interface Publish {
   version: number
   url: string

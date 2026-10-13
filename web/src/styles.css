@@ -383,6 +383,21 @@ body {
   font-size: var(--fs-xs);
 }
 
+/* Offered in place of the composer when a 回合 failed, so the retry is next
+   to the timeline that explains what broke. */
+.ws-retry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-dim);
+}
+
 .auth-gate {
   align-items: center;
   color: var(--text-dim);
@@ -1840,6 +1855,20 @@ select {
 
 .tl-error {
   border-color: var(--c-danger);
+}
+
+/* Where the 回合 broke, and what to do about it. The raw provider error
+   alone leaves the user with nothing actionable. */
+.tl-stage {
+  color: var(--c-danger);
+  font-weight: 500;
+}
+
+.tl-hint {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
 }
 
 .preview-stage {

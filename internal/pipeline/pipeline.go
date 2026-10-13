@@ -170,21 +170,48 @@ func readAppFiles(dir string) (map[string]string, error) {
 	return files, nil
 }
 
+// 回合 stages, in execution order. They are reported on a failure so the
+// client can say where the turn broke instead of only what the error said
+// (ticket #30).
+const (
+	StagePlan         = "plan"
+	StageSpec         = "spec"
+	StageArchitecture = "architecture"
+	StageGenerate     = "generate"
+	StageWrite        = "write"
+	StageBuild        = "build"
+)
+
+// stageHints turn a stage into something the user can act on. A bare provider
+// error tells them nothing about what to do next.
+var stageHints = map[string]string{
+	StagePlan:         "模型没能拆解这个需求。把想法说得更具体一些再试一次。",
+	StageSpec:         "整理产品规格时失败，通常是模型返回不可用。重试会重新调用模型。",
+	StageArchitecture: "设计架构时失败，通常是模型返回不可用。重试会重新调用模型。",
+	StageGenerate:     "生成代码时失败，可能是模型不可用或输出无法解析。重试会重新调用模型。",
+	StageWrite:        "生成的代码没有通过校验。重试会重新生成；若连续失败，把需求拆小一些。",
+	StageBuild:        "生成的代码无法构建。重试会重新生成；若连续失败，把需求拆小一些。",
+}
+
 // Run executes the full agent sequence for the session's current prompt.
 func (p *Pipeline) Run(ctx context.Context, owner, id string) {
-	fail := func(err error) {
-		p.emit(owner, id, session.Event{Type: "error", Payload: map[string]any{"message": err.Error()}})
+	fail := func(stage string, err error) {
+		payload := map[string]any{"message": err.Error(), "stage": stage}
+		if hint, ok := stageHints[stage]; ok {
+			payload["hint"] = hint
+		}
+		p.emit(owner, id, session.Event{Type: "error", Payload: payload})
 	}
-	files, err := p.run(ctx, owner, id)
+	files, stage, err := p.run(ctx, owner, id)
 	status := "ready"
 	if err != nil {
 		status = "failed"
-		fail(err)
+		fail(stage, err)
 	}
 	if files != nil {
 		if err := p.writeFiles(owner, id, files); err != nil {
 			status = "failed"
-			fail(err)
+			fail(StageWrite, err)
 		} else if p.Builder != nil {
 			appDir := filepath.Join(p.Store.Workspace(owner, id), "app")
 			distDir := filepath.Join(p.Store.Workspace(owner, id), "dist")
@@ -194,7 +221,7 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 				_ = os.RemoveAll(distDir)
 				p.dropArtifacts(id)
 				status = "failed"
-				fail(err)
+				fail(StageBuild, err)
 			} else if p.Artifacts != nil {
 				if _, err := p.Artifacts.PutTree(ctx, artifact.SessionPrefix(id), distDir); err != nil {
 					// A multi-replica /app reads from the shared store, so a
@@ -203,7 +230,7 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 					_ = os.RemoveAll(distDir)
 					p.dropArtifacts(id)
 					status = "failed"
-					fail(fmt.Errorf("store build: %w", err))
+					fail(StageBuild, fmt.Errorf("store build: %w", err))
 				}
 			}
 		}
@@ -235,10 +262,13 @@ func (p *Pipeline) appendTurnSummary(owner, id, status string, files provider.Fi
 	}
 }
 
-func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet, error) {
+// run executes the 流水线 stages and reports which stage failed, so Run can
+// label the error event. An empty stage means the failure was not inside a
+// stage (e.g. the session could not be loaded).
+func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet, string, error) {
 	sess, err := p.Store.Load(owner, id)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	step := func(agent, typ, detail string) bool {
 		if p.StepDelay > 0 {
@@ -254,13 +284,13 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 	}
 
 	if !step("mike", "plan", "拆解需求并制定执行计划") {
-		return nil, ctx.Err()
+		return nil, StagePlan, ctx.Err()
 	}
 	if !step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", sess.Prompt)) {
-		return nil, ctx.Err()
+		return nil, StageSpec, ctx.Err()
 	}
 	if !step("bob", "architecture", "设计系统结构：React + TypeScript，组件化组织") {
-		return nil, ctx.Err()
+		return nil, StageArchitecture, ctx.Err()
 	}
 
 	// Current-version files feed the augmented prompt (ADR-0003); missing
@@ -277,7 +307,7 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, StageGenerate, err
 	}
 	// The pipeline alone announces file writes, uniformly for every
 	// 生成引擎 (chain, single LLM provider, or test fake).
@@ -289,7 +319,7 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 	for _, path := range paths {
 		p.emit(owner, id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": path}})
 	}
-	return files, nil
+	return files, "", nil
 }
 
 func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet) error {
