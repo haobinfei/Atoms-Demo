@@ -1,12 +1,5 @@
-# 构建与推送对齐 AuthSphere：self-hosted runner（ARC atoms-demo-runner）
-# + 阿里云 ACR + buildx docker driver（宿主 daemon，避免拉 buildkit 镜像）。
-#
-# push main：构建并推送分支/sha 镜像；打 v* tag：额外把镜像版本回写到
-# atoms-demo-gitops 的 values.yaml —— Argo CD automated sync 检测到
-# gitops 仓库变更后自动拉起新版本。
-#
-# 依赖的仓库 Secrets（在 GitHub 仓库 Settings 中配置，值与 AuthSphere 相同）：
-#   ALIYUN_REGISTRY_USERNAME / ALIYUN_REGISTRY_PASSWORD（阿里云 ACR 推送）
+# 使用 self-hosted runner 的 Docker daemon，避免下载 Docker Actions 超时。
+# main 构建分支/sha 镜像，v* tag 构建版本镜像并回写 GitOps。
 name: Release
 
 on:
@@ -17,115 +10,60 @@ on:
 env:
   REGISTRY: registry.cn-hangzhou.aliyuncs.com
   NAMESPACE: ss-vip
-  SERVER_IMAGE: atoms-demo-server
-  WEB_IMAGE: atoms-demo-web
 
 jobs:
-  # ------------------------------
-  # 后端镜像构建与推送
-  # ------------------------------
-  build-server:
-    name: Build Server Image
+  build:
+    name: Build ${{ matrix.component }} Image
     runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [server, web]
     steps:
       - uses: actions/checkout@v4
+      - name: Build and push image
+        env:
+          REGISTRY_USERNAME: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
+          IMAGE="$REGISTRY/$NAMESPACE/atoms-demo-$COMPONENT"
+          SHA_TAG="${GITHUB_SHA:0:7}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME#v}"
+          else
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          fi
+          # 关闭 provenance/sbom，避免 ACR 不支持的 attestation manifest。
+          docker buildx build --provenance=false --sbom=false --push \
+            --file "Dockerfile.$COMPONENT" \
+            --tag "$IMAGE:$SHA_TAG" --tag "$IMAGE:$RELEASE_TAG" .
 
-      - uses: docker/setup-buildx-action@v3
-        with:
-          # 使用宿主机 Docker daemon，避免拉取 moby/buildkit 镜像（国内网络访问 Docker Hub 超时）
-          driver: docker
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
-          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
-
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.SERVER_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=sha,prefix=,suffix=,format=short
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.server
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # 关闭 attestation：buildx 默认附加的 provenance/sbom 会产生 OCI 空层 manifest，
-          # 阿里云 ACR 拒绝（AuthSphere v0.1.0 发版即中过招）
-          provenance: false
-          sbom: false
-
-  # ------------------------------
-  # 前端镜像构建与推送
-  # ------------------------------
-  build-web:
-    name: Build Web Image
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
-          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
-
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.WEB_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=sha,prefix=,suffix=,format=short
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.web
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
-          sbom: false
-
-  # ------------------------------
-  # 回写 atoms-demo-gitops 镜像版本（仅 tag 触发）
-  # ------------------------------
   bump-gitops:
     name: Bump Image Tags in atoms-demo-gitops
     runs-on: self-hosted
-    needs: [build-server, build-web]
+    needs: [build]
     if: github.ref_type == 'tag'
     steps:
-      # 不传 token：checkout 的 https URL 会被 runner 内 /etc/gitconfig 改写为
-      # ssh 别名（见 gitops 仓库 templates/40-actions-runner-controller.yaml），
-      # 用 atoms-demo-gitops 的读写 deploy key（arc-git-ssh secret 内的
-      # id_atoms-demo-gitops）完成认证与推送。
+      # runner 的 git/ssh 配置使用 GitOps 读写 deploy key。
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/atoms-demo-gitops
-
       - name: Bump image tags
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           sed -i "s|tag: \".*\"|tag: \"${TAG}\"|g" charts/atoms-demo/values.yaml
-          grep -B1 -A3 "  server:" charts/atoms-demo/values.yaml
-
-      - name: Commit & push
+      - name: Commit and push
         run: |
           git config user.name "atoms-release-bot"
           git config user.email "release-bot@users.noreply.github.com"
-          git commit -am "release: image tag ${GITHUB_REF_NAME}"
+          git add charts/atoms-demo/values.yaml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "release: image tag ${GITHUB_REF_NAME}"
           git push
