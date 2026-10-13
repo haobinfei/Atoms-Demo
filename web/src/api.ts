@@ -1,6 +1,19 @@
 export interface SessionEvent {
   seq: number
-  type: 'plan' | 'spec' | 'architecture' | 'file' | 'score' | 'contest' | 'publish' | 'done' | 'error' | 'agent' | 'message' | 'recovered'
+  type:
+    | 'plan'
+    | 'spec'
+    | 'architecture'
+    | 'file'
+    | 'score'
+    | 'contest'
+    | 'publish'
+    | 'done'
+    | 'error'
+    | 'agent'
+    | 'message'
+    | 'recovered'
+    | 'cancel'
   agent?: string
   payload?: Record<string, unknown>
   at: string
@@ -229,6 +242,12 @@ export async function chatSession(id: string, message: string): Promise<void> {
 // already on the session, so no message is sent.
 export const retrySession = (id: string) =>
   apiRequest(`/api/sessions/${encodeURIComponent(id)}/retry`, 'POST')
+
+// 取消回合 (Cancel Turn): asks the server to stop the 回合 now executing. The
+// server only records the request — the Worker aborts between steps and keeps
+// the previous version — so the session stays 构建中 until it lands.
+export const cancelSession = (id: string) =>
+  apiRequest(`/api/sessions/${encodeURIComponent(id)}/cancel`, 'POST')
 
 export interface Publish {
   version: number

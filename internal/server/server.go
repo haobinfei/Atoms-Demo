@@ -88,6 +88,10 @@ type Config struct {
 	// building sessions with no live lease. Zero uses the 30s default; tests
 	// shrink it.
 	SweepInterval time.Duration
+	// StepDelay spaces the 流水线 stages so the timeline reads as progress
+	// rather than a burst. Zero uses the 120ms production default; E2E raises
+	// it so a 取消回合 (Cancel Turn) has a window to land in.
+	StepDelay time.Duration
 }
 
 type Server struct {
@@ -159,6 +163,10 @@ func New(cfg Config) *Server {
 	if sweepInterval <= 0 {
 		sweepInterval = 30 * time.Second
 	}
+	stepDelay := cfg.StepDelay
+	if stepDelay <= 0 {
+		stepDelay = 120 * time.Millisecond
+	}
 	host, _ := os.Hostname()
 	build := builder.New()
 	s := &Server{
@@ -173,7 +181,7 @@ func New(cfg Config) *Server {
 			Prov:      prov,
 			Builder:   build,
 			Artifacts: artifacts,
-			StepDelay: 120 * time.Millisecond,
+			StepDelay: stepDelay,
 		},
 		artifacts:     artifacts,
 		builder:       build,
@@ -358,6 +366,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDelete)
 	mux.HandleFunc("POST /api/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /api/sessions/{id}/retry", s.handleRetry)
+	mux.HandleFunc("POST /api/sessions/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /api/sessions/{id}/winner", s.handleWinner)
 	mux.HandleFunc("POST /api/sessions/{id}/publish", s.handlePublish)
 	mux.HandleFunc("POST /api/sessions/{id}/unpublish", s.handleUnpublish)
@@ -1136,6 +1145,49 @@ func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "building"})
+}
+
+// handleCancel records a 取消回合 (Cancel Turn) request against the running
+// 回合. It only marks the request: the Worker executing the turn reads the
+// flag back off the 事件流 between steps, aborts before the file writes that
+// commit a turn, and leaves the session 就绪 with the previous version intact
+// (ADR-0013). Marking rather than stopping is what makes cancel correct with
+// several replicas — the request may well be served by a replica that is not
+// the one running the turn.
+func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	user := s.requestWorkspaceID(r)
+	sess, err := s.store.Load(user, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.Status != "building" {
+		writeError(w, http.StatusConflict, "没有正在执行的回合")
+		return
+	}
+	// Only a 回合 is cancellable. A 发布 (Publish) or 竞赛 (Contest) is not
+	// something the user aborts this way, and reporting success while the
+	// work ran on would be a lie.
+	if session.JobKind(sess) != string(jobqueue.KindTurn) {
+		writeError(w, http.StatusConflict, "只能取消正在执行的回合")
+		return
+	}
+	ev, ok, err := s.store.RequestCancel(user, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		// The 回合 ended between the check above and the flag write.
+		writeError(w, http.StatusConflict, "没有正在执行的回合")
+		return
+	}
+	// Fan the request out to live SSE clients. Best effort: the event is
+	// already persisted, so a failed publish only delays it to the client's
+	// next replay (ADR-0007).
+	s.pipeline.PublishEvent(id, ev)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "canceling"})
 }
 
 // handlePublish claims the session and puts a 发布 (Publish) Job on the Queue,

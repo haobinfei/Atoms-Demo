@@ -13,6 +13,7 @@ const TYPE_LABEL: Record<string, string> = {
   contest: '竞赛',
   done: '完成',
   recovered: '恢复重跑',
+  cancel: '取消回合',
   error: '出错',
   agent: '工作中',
 }
@@ -67,6 +68,9 @@ function TurnBody({ turn }: { turn: TimelineTurn }) {
       {turn.events.map((ev, i) => {
         // Rendered once by TurnFiles instead of one row per path.
         if (ev.type === 'file') return null
+        // A cancelled turn's 完成 is bookkeeping for the client, not an agent
+        // step: the 取消回合 record already says what happened.
+        if (ev.type === 'done' && ev.payload?.canceled === true) return null
         const who = persona(ev.agent)
         const prev = i > 0 ? turn.events[i - 1] : null
         const showHeader = !prev || prev.agent !== ev.agent
@@ -118,7 +122,7 @@ export default function Timeline({ events, prompt }: { events: SessionEvent[]; p
             <TurnBody turn={turn} />
             {turn.status === 'building' && <div className="tl-typing">智能体团队工作中…</div>}
           </div>
-          <div className={`tl-turn-result tl-turn-result--${turn.status}`}>
+          <div className={`tl-turn-result tl-turn-result--${turn.canceled ? 'canceled' : turn.status}`}>
             {summariseTurn(turn)}
           </div>
         </section>

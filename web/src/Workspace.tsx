@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  cancelSession,
   chatSession,
   getSession,
   isAuthError,
@@ -20,11 +21,13 @@ const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主�
 // latestReadyBuildSeq returns the seq of the newest 完成 event that produced a
 // servable build, or 0 when the session has no ready build yet. The preview
 // iframe is keyed on builtAt, so this is the only signal allowed to remount it
-// (ticket #26): a build that failed leaves no new version to show.
+// (ticket #26): a build that failed leaves no new version to show, and a
+// 取消回合 (Cancel Turn) leaves the previous version exactly as it was.
 function latestReadyBuildSeq(events: SessionEvent[]): number {
   let seq = 0
   for (const ev of events) {
-    if (ev.type === 'done' && ((ev.payload?.status as string) ?? 'ready') === 'ready') {
+    if (ev.type !== 'done' || ev.payload?.canceled === true) continue
+    if (((ev.payload?.status as string) ?? 'ready') === 'ready') {
       seq = Math.max(seq, ev.seq)
     }
   }
@@ -50,12 +53,17 @@ export default function Workspace({
   const [chatText, setChatText] = useState('')
   const [sending, setSending] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [canceling, setCanceling] = useState(false)
   // Follow-ups typed while a 回合 was running. They wait for it to finish
   // rather than interrupting it (ticket #29).
   const [queue, setQueue] = useState<string[]>([])
   const [chatError, setChatError] = useState(false)
   const [reviewVersion, setReviewVersion] = useState('')
   const seenRef = useRef(0)
+  // Set when the running 回合 was aborted rather than finished. The queue must
+  // not drain behind a cancel: those messages were written against the turn
+  // the user just abandoned, so they wait for an explicit send (ADR-0013).
+  const cancelRequestedRef = useRef(false)
   // Highest 完成 event already reflected in the preview. Only a build that
   // advances past this may remount the iframe, so the 15s reconcile poll can
   // never interrupt a preview the user is working in (ticket #26).
@@ -92,10 +100,16 @@ export default function Workspace({
           const ev = JSON.parse(msg.data as string) as SessionEvent
           seenRef.current = Math.max(seenRef.current, ev.seq)
           setEvents((prev) => (prev.some((e) => e.seq === ev.seq) ? prev : [...prev, ev]))
+          if (ev.type === 'cancel') {
+            // The 取消回合 request is on the stream before the turn winds
+            // down, so the queue is already protected when 完成 arrives.
+            cancelRequestedRef.current = true
+          }
           if (ev.type === 'done') {
             const status = ((ev.payload?.status as string) ?? 'ready') as Session['status']
             setSession((prev) => (prev ? { ...prev, status } : prev))
-            if (status === 'ready') markBuilt(ev.seq)
+            if (ev.payload?.canceled === true) cancelRequestedRef.current = true
+            else if (status === 'ready') markBuilt(ev.seq)
           }
           if (ev.type === 'contest' || ev.type === 'score' || ev.type === 'publish' || ev.type === 'done') {
             // Contest progress lives on the session; refetch so the
@@ -190,13 +204,53 @@ export default function Workspace({
   }
 
   // Drain the queue once the current 回合 has finished. Dequeuing before
-  // sending means a second pass cannot resend the same entry.
+  // sending means a second pass cannot resend the same entry. A cancelled
+  // turn ends the wait but not the messages: they stay queued until the user
+  // sends them (ADR-0013).
   useEffect(() => {
     if (busy || queue.length === 0) return
+    if (cancelRequestedRef.current) {
+      cancelRequestedRef.current = false
+      return
+    }
     const [next, ...rest] = queue
     setQueue(rest)
     void sendChat(next)
   }, [busy, queue])
+
+  // 取消回合 (Cancel Turn): stop the turn that is running. The server only
+  // records the request, so the session stays 构建中 until the Worker reaches
+  // its next step — hence the separate 取消中 label rather than an instant
+  // status flip.
+  async function cancel() {
+    if (canceling) return
+    setCanceling(true)
+    setChatError(false)
+    try {
+      await cancelSession(sessionId)
+      // Guard the queue from here, not from the stream: a wedged SSE
+      // connection would otherwise let the follow-ups go out behind a cancel.
+      cancelRequestedRef.current = true
+    } catch (err) {
+      if (isAuthError(err)) {
+        redirectToLogin()
+        return
+      }
+      setChatError(true)
+      console.error('cancel turn failed', err)
+    } finally {
+      setCanceling(false)
+    }
+  }
+
+  // Sends one queued message on the user's say-so. Used after a cancel, when
+  // the queue is deliberately left alone.
+  function sendQueued(at: number) {
+    const text = queue[at]
+    if (!text || busy) return
+    setQueue((prev) => prev.filter((_, i) => i !== at))
+    void sendChat(text)
+  }
 
   // Re-runs the failed 回合 from the same requirement and history. No message
   // is sent, so nothing is duplicated on the timeline (ticket #30).
@@ -258,6 +312,18 @@ export default function Workspace({
                 </button>
               </div>
             )}
+            {session?.status === 'building' && (
+              <div className="ws-cancel-bar">
+                <span>智能体团队正在生成，取消后会保留上一版。</span>
+                <button
+                  className="btn btn--ghost btn--sm"
+                  disabled={canceling}
+                  onClick={() => void cancel()}
+                >
+                  {canceling ? '取消中…' : '取消本回合'}
+                </button>
+              </div>
+            )}
             <div className="ws-chips">
               {QUICK_CHIPS.map((chip) => (
                 <button
@@ -276,6 +342,14 @@ export default function Workspace({
                   <li key={`${i}-${text}`}>
                     <span className="ws-queue-tag">排队中</span>
                     <span className="ws-queue-text">{text}</span>
+                    <button
+                      className="ws-queue-send"
+                      disabled={busy}
+                      aria-label={`发送排队消息：${text}`}
+                      onClick={() => sendQueued(i)}
+                    >
+                      发送
+                    </button>
                     <button
                       className="ws-queue-drop"
                       aria-label={`移除排队消息：${text}`}

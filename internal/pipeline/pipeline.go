@@ -5,6 +5,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -44,14 +45,72 @@ func (p *Pipeline) emit(owner, id string, ev session.Event) {
 		slog.Error("append event", "session", id, "type", ev.Type, "err", err)
 		return
 	}
+	p.PublishEvent(id, appended)
+}
+
+// PublishEvent fans an event the Store already persisted out to live SSE
+// clients. Publishing is best effort: the event is durable, so a failed
+// fan-out only delays it until the client's next replay (ADR-0007).
+func (p *Pipeline) PublishEvent(id string, ev session.Event) {
 	if p.Bus == nil {
 		return
 	}
 	// Postgres already holds the event; Redis fan-out is a hot path, so a
 	// publish failure must never fail or roll back the turn (ADR-0007).
-	if err := p.Bus.Publish(context.Background(), id, appended); err != nil {
-		slog.Warn("publish event", "session", id, "seq", appended.Seq, "err", err)
+	if err := p.Bus.Publish(context.Background(), id, ev); err != nil {
+		slog.Warn("publish event", "session", id, "seq", ev.Seq, "err", err)
 	}
+}
+
+// errCanceled aborts the running 回合 without failing it: the session returns
+// to 就绪 and the previous version stays live (ADR-0013).
+var errCanceled = errors.New("turn canceled")
+
+// canceled reports whether a 取消回合 (Cancel Turn) request is outstanding for
+// the 回合 now executing. The request is the newest event of its kind, and it
+// only counts while no terminal event (完成/出错) is newer: a turn that has
+// already ended closes the window, so a request that raced the end of a turn
+// cannot cancel the next one.
+//
+// The flag is read back from the Store rather than held in process memory, so
+// this works when the request was served by a different replica and when the
+// 回合 is re-run after a restart (ADR-0013).
+func (p *Pipeline) canceled(owner, id string) bool {
+	events, err := p.Store.EventsAfter(owner, id, 0)
+	if err != nil {
+		// A read failure must not abort a healthy turn: the next check
+		// retries, and the request stays on the stream until then.
+		slog.Warn("read events for cancel check", "session", id, "err", err)
+		return false
+	}
+	requested, terminal := 0, 0
+	for _, ev := range events {
+		switch ev.Type {
+		case session.CancelEventType:
+			requested = ev.Seq
+		case "done", "error":
+			terminal = ev.Seq
+		}
+	}
+	return requested > terminal
+}
+
+// finishCanceled ends a 回合 the user aborted. The session goes back to 就绪
+// — never 失败 — and the previous version is untouched, because the abort
+// happens before the file writes that commit a turn. The terminal 完成 event
+// is what tells the client the turn stopped, and what closes the cancel
+// window so the next turn is not aborted by this request.
+func (p *Pipeline) finishCanceled(owner, id string) {
+	p.setStatus(owner, id, "ready")
+	msg := session.Message{Role: "agent", Agent: "mike", Content: "本回合已取消，保留上一版产物。"}
+	if err := p.Store.AppendMessage(owner, id, msg); err != nil {
+		slog.Error("append cancel summary", "session", id, "err", err)
+	}
+	p.emit(owner, id, session.Event{Type: "done", Agent: "mike", Payload: map[string]any{
+		"status":   "ready",
+		"canceled": true,
+		"detail":   "本回合已取消，保留上一版产物",
+	}})
 }
 
 // EmitUserMessage puts the user's utterance onto the 事件流 so the
@@ -203,6 +262,10 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 		p.emit(owner, id, session.Event{Type: "error", Payload: payload})
 	}
 	files, stage, err := p.run(ctx, owner, id)
+	if errors.Is(err, errCanceled) {
+		p.finishCanceled(owner, id)
+		return
+	}
 	status := "ready"
 	if err != nil {
 		status = "failed"
@@ -264,33 +327,38 @@ func (p *Pipeline) appendTurnSummary(owner, id, status string, files provider.Fi
 
 // run executes the 流水线 stages and reports which stage failed, so Run can
 // label the error event. An empty stage means the failure was not inside a
-// stage (e.g. the session could not be loaded).
+// stage (e.g. the session could not be loaded). A 取消回合 (Cancel Turn)
+// request is reported as errCanceled, which Run turns into a 就绪 session
+// rather than a failure.
 func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet, string, error) {
 	sess, err := p.Store.Load(owner, id)
 	if err != nil {
 		return nil, "", err
 	}
-	step := func(agent, typ, detail string) bool {
+	step := func(agent, typ, detail string) error {
+		if p.canceled(owner, id) {
+			return errCanceled
+		}
 		if p.StepDelay > 0 {
 			select {
 			case <-ctx.Done():
-				return false
+				return ctx.Err()
 			case <-time.After(p.StepDelay):
 			}
 		}
 		payload := map[string]any{"detail": detail}
 		p.emit(owner, id, session.Event{Type: typ, Agent: agent, Payload: payload})
-		return true
+		return nil
 	}
 
-	if !step("mike", "plan", "拆解需求并制定执行计划") {
-		return nil, StagePlan, ctx.Err()
+	if err := step("mike", "plan", "拆解需求并制定执行计划"); err != nil {
+		return nil, StagePlan, err
 	}
-	if !step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", sess.Prompt)) {
-		return nil, StageSpec, ctx.Err()
+	if err := step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", sess.Prompt)); err != nil {
+		return nil, StageSpec, err
 	}
-	if !step("bob", "architecture", "设计系统结构：React + TypeScript，组件化组织") {
-		return nil, StageArchitecture, ctx.Err()
+	if err := step("bob", "architecture", "设计系统结构：React + TypeScript，组件化组织"); err != nil {
+		return nil, StageArchitecture, err
 	}
 
 	// Current-version files feed the augmented prompt (ADR-0003); missing
@@ -308,6 +376,13 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 	})
 	if err != nil {
 		return nil, StageGenerate, err
+	}
+	// Checked after 生成 and before the file events: a turn commits at
+	// writeFiles, so aborting here is what keeps the previous version whole.
+	// The 生成 call itself is the longest step, so this is the point where a
+	// cancel has the most to save.
+	if p.canceled(owner, id) {
+		return nil, "", errCanceled
 	}
 	// The pipeline alone announces file writes, uniformly for every
 	// 生成引擎 (chain, single LLM provider, or test fake).
