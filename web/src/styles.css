@@ -658,6 +658,83 @@ body {
   max-width: 90%;
 }
 
+/* A 回合 groups the user's input, the 智能体 work it caused, and its outcome,
+   so a revised session reads as a sequence of asks rather than as one
+   undifferentiated event log (ticket #28). */
+.tl-turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-1);
+}
+
+.tl-turn + .tl-turn {
+  margin-top: var(--sp-4);
+}
+
+.tl-turn-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.tl-turn-index {
+  align-self: flex-start;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.tl-turn-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.tl-turn-result {
+  border-top: 1px solid var(--c-border);
+  padding-top: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-dim);
+}
+
+.tl-turn-result--ready {
+  color: var(--c-success);
+}
+
+.tl-turn-result--failed {
+  color: var(--c-danger);
+}
+
+/* The turn's file writes, collapsed behind a count. */
+.tl-files {
+  margin-left: 34px;
+  font-size: var(--fs-sm);
+  color: var(--c-text-dim);
+}
+
+.tl-files summary {
+  cursor: pointer;
+}
+
+.tl-files ul {
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-4);
+  list-style: none;
+}
+
+.tl-files li {
+  padding: 2px 0;
+}
+
+.tl-files code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-xs);
+  color: var(--c-text);
+}
+
 .tl-agent {
   display: flex;
   align-items: center;
