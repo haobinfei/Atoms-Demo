@@ -50,6 +50,9 @@ export default function Workspace({
   const [chatText, setChatText] = useState('')
   const [sending, setSending] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  // Follow-ups typed while a 回合 was running. They wait for it to finish
+  // rather than interrupting it (ticket #29).
+  const [queue, setQueue] = useState<string[]>([])
   const [chatError, setChatError] = useState(false)
   const [reviewVersion, setReviewVersion] = useState('')
   const seenRef = useRef(0)
@@ -162,12 +165,38 @@ export default function Workspace({
         redirectToLogin()
         return
       }
+      // Hand the text back rather than dropping it — including when the send
+      // came from the queue, where the user would otherwise never see it fail.
+      setChatText((current) => current || msg)
       setChatError(true)
       console.error('chat turn failed', err)
     } finally {
       setSending(false)
     }
   }
+
+  // Submitting while a 回合 is running queues the message instead of
+  // interrupting it: the turn in flight is never cancelled by a follow-up
+  // (ticket #29).
+  function submitChat(text: string) {
+    const msg = text.trim()
+    if (!msg) return
+    if (busy) {
+      setQueue((prev) => [...prev, msg])
+      setChatText('')
+      return
+    }
+    void sendChat(msg)
+  }
+
+  // Drain the queue once the current 回合 has finished. Dequeuing before
+  // sending means a second pass cannot resend the same entry.
+  useEffect(() => {
+    if (busy || queue.length === 0) return
+    const [next, ...rest] = queue
+    setQueue(rest)
+    void sendChat(next)
+  }, [busy, queue])
 
   // Re-runs the failed 回合 from the same requirement and history. No message
   // is sent, so nothing is duplicated on the timeline (ticket #30).
@@ -234,27 +263,53 @@ export default function Workspace({
                 <button
                   key={chip}
                   className="ws-chip"
-                  disabled={busy}
-                  onClick={() => void sendChat(chip)}
+                  disabled={chatText.trim() !== '' && queue.length > 0}
+                  onClick={() => submitChat(chip)}
                 >
                   {chip}
                 </button>
               ))}
             </div>
+            {queue.length > 0 && (
+              <ul className="ws-queue">
+                {queue.map((text, i) => (
+                  <li key={`${i}-${text}`}>
+                    <span className="ws-queue-tag">排队中</span>
+                    <span className="ws-queue-text">{text}</span>
+                    <button
+                      className="ws-queue-drop"
+                      aria-label={`移除排队消息：${text}`}
+                      onClick={() => setQueue((prev) => prev.filter((_, at) => at !== i))}
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <form
               className="ws-chat-form"
               onSubmit={(e) => {
                 e.preventDefault()
-                void sendChat(chatText)
+                submitChat(chatText)
               }}
             >
-              <input
+              <textarea
                 value={chatText}
+                rows={2}
                 onChange={(e) => setChatText(e.target.value)}
-                placeholder={busy ? '智能体团队工作中…' : '继续描述你想要的变化…'}
-                disabled={busy}
+                onKeyDown={(e) => {
+                  // Enter sends; Shift+Enter is a newline. An IME candidate
+                  // confirmation also arrives as Enter and must never send.
+                  if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
+                  e.preventDefault()
+                  submitChat(chatText)
+                }}
+                placeholder={
+                  busy ? '智能体团队工作中，消息会排队发送…' : '继续描述你想要的变化…'
+                }
               />
-              <button type="submit" disabled={busy || !chatText.trim()}>
+              <button type="submit" disabled={!chatText.trim()}>
                 发送
               </button>
             </form>

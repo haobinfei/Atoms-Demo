@@ -347,7 +347,8 @@ body {
   gap: 8px;
 }
 
-.ws-chat-form input {
+.ws-chat-form input,
+.ws-chat-form textarea {
   flex: 1;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -357,9 +358,63 @@ body {
   padding: 8px 12px;
 }
 
-.ws-chat-form input:focus {
+.ws-chat-form textarea {
+  resize: none;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.ws-chat-form input:focus,
+.ws-chat-form textarea:focus {
   border-color: var(--accent);
   outline: none;
+}
+
+/* Follow-ups typed while a 回合 is running, waiting for it to finish. */
+.ws-queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.ws-queue li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px dashed var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-dim);
+}
+
+.ws-queue-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--r-full);
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+
+.ws-queue-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-queue-drop {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: var(--fs-md);
+  line-height: 1;
 }
 
 .ws-chat-form button {
@@ -1907,7 +1962,8 @@ select {
   color: var(--c-accent);
 }
 
-.ws-chat-form input:focus {
+.ws-chat-form input:focus,
+.ws-chat-form textarea:focus {
   border-color: var(--c-accent);
   box-shadow: 0 0 0 3px var(--c-accent-soft);
   outline: none;

@@ -6,6 +6,12 @@ interface StubOptions {
   events: Record<string, unknown>[]
 }
 
+export interface SessionStub {
+  // Lets a case move the session out of 构建中 so a follow-up queued behind it
+  // can be seen going out.
+  setStatus(status: string): void
+}
+
 // stubSession drives the client with an explicit single-session payload and
 // an empty event stream.
 //
@@ -18,7 +24,8 @@ interface StubOptions {
 //
 // The server contract behind these branches is covered by the HTTP-layer
 // tests; what is under test here is the client wiring.
-export async function stubSession(page: Page, opts: StubOptions): Promise<void> {
+export async function stubSession(page: Page, opts: StubOptions): Promise<SessionStub> {
+  let status = opts.status
   // An empty stream: EventSource retries, but no 完成 event ever arrives to
   // overwrite the stubbed status.
   await page.route(/\/api\/sessions\/[^/]+\/events/, async (route) => {
@@ -37,7 +44,7 @@ export async function stubSession(page: Page, opts: StubOptions): Promise<void> 
       body: JSON.stringify({
         id,
         prompt: '一家咖啡店的电商网站',
-        status: opts.status,
+        status,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         messages: [],
@@ -46,4 +53,9 @@ export async function stubSession(page: Page, opts: StubOptions): Promise<void> 
       }),
     })
   })
+  return {
+    setStatus: (next: string) => {
+      status = next
+    },
+  }
 }

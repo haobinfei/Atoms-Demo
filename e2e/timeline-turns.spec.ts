@@ -10,7 +10,7 @@ test('the timeline groups a build and a revision into two turns', async ({ page,
   await expect(page.locator('.tl-item.tl-done').first()).toBeVisible({ timeout: 60_000 })
 
   // A follow-up opens the second turn.
-  await page.locator('.ws-chat-form input').fill('把主题色换成绿色')
+  await page.locator('.ws-chat-form textarea').fill('把主题色换成绿色')
   await page.locator('.ws-chat-form button[type="submit"]').click()
   await expect(page.locator('.tl-item.tl-done').nth(1)).toBeVisible({ timeout: 60_000 })
 
