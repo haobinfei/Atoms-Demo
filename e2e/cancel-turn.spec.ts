@@ -11,12 +11,17 @@ test('cancelling a running turn keeps the previous version live', async ({ page,
   await page.getByRole('button', { name: '开始构建' }).click()
   await expect(page.locator('.tl-item.tl-done').first()).toBeVisible({ timeout: 60_000 })
 
-  // The first turn produced a version; remember which one /app is serving.
+  // The first turn produced a version. 预览 is member-only until the app is
+  // published, so the request must carry the session cookie — hence
+  // page.request rather than the bare request fixture.
   const iframe = page.locator('.preview-stage iframe')
   await expect(iframe).toBeVisible()
   const sessionId = ((await iframe.getAttribute('src')) ?? '').match(/\/app\/([^/]+)\//)?.[1] ?? ''
   expect(sessionId, 'session id from the preview address').not.toBe('')
-  expect((await request.get(`/app/${sessionId}/`)).status()).toBe(200)
+  const appURL = `/app/${sessionId}/`
+  const before = await page.request.get(appURL)
+  expect(before.status()).toBe(200)
+  const beforeBody = await before.text()
 
   // A follow-up starts a second 回合; cancel it while it is still running. The
   // E2E server slows the stages on purpose so the button cannot miss the turn.
@@ -32,10 +37,12 @@ test('cancelling a running turn keeps the previous version live', async ({ page,
   await expect(turns.nth(1).locator('.tl-item.tl-cancel')).toContainText('取消回合')
   await expect(turns.nth(1).locator('.tl-turn-result')).toContainText('本轮已取消')
 
-  // The point of the whole feature: the previous version is still what /app
-  // serves, and the preview is still mounted on it.
-  expect((await request.get(`/app/${sessionId}/`)).status()).toBe(200)
-  await expect(iframe).toBeVisible()
+  // The point of the whole feature: /app serves the very same bytes it did
+  // before the turn was abandoned, and the preview is still mounted on them.
+  const after = await page.request.get(appURL)
+  expect(after.status()).toBe(200)
+  expect(await after.text()).toBe(beforeBody)
+  await expect(page.frameLocator('.frame').getByText('用心挑选的每一款')).toBeVisible()
 })
 
 // The other half of ADR-0013: queued follow-ups are not the turn's to take
