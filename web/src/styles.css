@@ -2453,3 +2453,42 @@ select {
      wrap rather than squeeze the row out of shape. */
   .ws-actions { flex-wrap: wrap; }
 }
+
+/* ---------- 预览版本标识与发布进行中 ---------- */
+
+.preview-bar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+/* 草稿版 vs 已发布版: the frame always shows the draft build, and the two only
+   coincide right after a 发布. */
+.preview-badge {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-full);
+  font-size: var(--fs-xs);
+  color: var(--c-text-dim);
+}
+
+.preview-badge--published {
+  border-color: var(--c-success);
+  color: var(--c-success);
+}
+
+/* Shown for the whole 发布 (Publish) wait, so a slow rebuild reads as progress
+   rather than as nothing happening. */
+.pub-progress {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-dim);
+}
+
+@media (max-width: 560px) {
+  /* The badge shares the preview bar with the viewport toggle and the two
+     actions; wrapping beats squeezing the row out of shape. */
+  .preview-bar { flex-wrap: wrap; gap: var(--sp-2); }
+}

@@ -4,6 +4,10 @@ interface StubOptions {
   status: string
   previewReady: boolean
   events: Record<string, unknown>[]
+  // The in-flight 任务 (Job) kind while status is "building"; a 发布 (Publish)
+  // is the one the client has to wait out rather than report as failed.
+  kind?: string
+  publishes?: Record<string, unknown>[]
 }
 
 export interface SessionStub {
@@ -17,6 +21,9 @@ export interface SessionStub {
   // (Cancel Turn) from the stream. Later reconnects replay the same seqs,
   // which the client dedupes.
   setStream(events: Record<string, unknown>[]): void
+  // Replaces the in-flight Job kind and the 发布 history.
+  setKind(kind: string): void
+  setPublishes(publishes: Record<string, unknown>[]): void
 }
 
 // stubSession drives the client with an explicit single-session payload and a
@@ -34,6 +41,8 @@ export interface SessionStub {
 export async function stubSession(page: Page, opts: StubOptions): Promise<SessionStub> {
   let status = opts.status
   let events = opts.events
+  let kind = opts.kind ?? ''
+  let publishes = opts.publishes ?? []
   let stream: Record<string, unknown>[] = []
   await page.route(/\/api\/sessions\/[^/]+\/events/, async (route) => {
     const body = stream.map((ev) => `data: ${JSON.stringify(ev)}\n\n`).join('')
@@ -53,10 +62,12 @@ export async function stubSession(page: Page, opts: StubOptions): Promise<Sessio
         id,
         prompt: '一家咖啡店的电商网站',
         status,
+        kind,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         messages: [],
         events,
+        publishes,
         previewReady: opts.previewReady,
       }),
     })
@@ -70,6 +81,12 @@ export async function stubSession(page: Page, opts: StubOptions): Promise<Sessio
     },
     setStream: (next: Record<string, unknown>[]) => {
       stream = next
+    },
+    setKind: (next: string) => {
+      kind = next
+    },
+    setPublishes: (next: Record<string, unknown>[]) => {
+      publishes = next
     },
   }
 }
