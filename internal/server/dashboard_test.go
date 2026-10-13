@@ -9,11 +9,12 @@ import (
 )
 
 type summary struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Category string `json:"category"`
-	Status   string `json:"status"`
-	Pinned   bool   `json:"pinned"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Category     string `json:"category"`
+	Status       string `json:"status"`
+	Pinned       bool   `json:"pinned"`
+	PreviewReady bool   `json:"previewReady"`
 }
 
 func listSessions(t *testing.T, tsURL, query string) []summary {

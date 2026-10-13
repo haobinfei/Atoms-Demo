@@ -29,26 +29,39 @@ const STATUS_BADGE: Record<string, string> = {
   failed: 'badge badge--danger',
 }
 
+// The cover only renders a live frame when the server says a build is
+// servable; otherwise it states why. Loading an iframe first and reacting to
+// onError cannot work, because an HTTP error page loads "successfully"
+// (ADR-0014).
 function ProjectCover({ session }: { session: SessionSummary }) {
-  const [previewFailed, setPreviewFailed] = useState(false)
-  const canPreview = session.status === 'ready' && !previewFailed
+  const [loaded, setLoaded] = useState(false)
+  const canPreview = session.previewReady
+
+  const note = session.previewReady
+    ? ''
+    : session.status === 'building'
+      ? '正在构建'
+      : session.status === 'failed'
+        ? '构建失败，暂无预览'
+        : '暂无预览'
 
   return (
     <div className={`dash-cover cover-${session.category}`} aria-label={`${session.name} 项目预览`}>
       {canPreview ? (
-        <div className="dash-cover-frame">
+        <div className={loaded ? 'dash-cover-frame is-loaded' : 'dash-cover-frame'}>
+          <span className="dash-cover-loading">预览加载中…</span>
           <iframe
             src={`/app/${session.id}/?v=${encodeURIComponent(session.updatedAt)}`}
             title={`${session.name} 预览`}
             loading="lazy"
             tabIndex={-1}
-            onError={() => setPreviewFailed(true)}
+            onLoad={() => setLoaded(true)}
           />
         </div>
       ) : (
         <>
           <span>{(session.name.trim()[0] ?? 'A').toUpperCase()}</span>
-          <small>{session.status === 'building' ? '正在构建' : '预览暂不可用'}</small>
+          <small>{note}</small>
         </>
       )}
       {canPreview && <span className="dash-cover-live">实时预览</span>}

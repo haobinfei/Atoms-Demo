@@ -41,6 +41,9 @@ export interface Session {
   events: SessionEvent[]
   messages: ChatMessage[]
   contest?: Contest
+  // Derived server-side per request: whether /app/{id}/ currently has a
+  // servable build. A rendering hint only, never an authorization signal.
+  previewReady: boolean
 }
 
 export async function createSession(prompt: string, competition = false): Promise<string> {
@@ -163,6 +166,7 @@ export interface SessionSummary {
   pinned: boolean
   prompt: string
   updatedAt: string
+  previewReady: boolean
 }
 
 export async function listSessions(q = ''): Promise<SessionSummary[]> {
