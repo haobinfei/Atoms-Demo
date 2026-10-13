@@ -44,9 +44,13 @@ test('a failed turn states the stage and can be retried', async ({ page, request
 
   await page.reload()
 
-  // Where it broke, in words, plus something to do about it.
+  // Where it broke, in words, plus something to do about it. Stated above the
+  // split as well as inside the timeline, so the advice sits next to the retry
+  // and stays visible whichever pane is maximised (ticket #34).
   await expect(page.locator('.tl-item.tl-error')).toContainText('失败阶段：代码生成')
   await expect(page.locator('.tl-hint')).toContainText('重试会重新调用模型')
+  await expect(page.locator('.ws-state--failed')).toContainText('本轮构建失败：代码生成')
+  await expect(page.locator('.ws-state--failed')).toContainText('重试会重新调用模型')
 
   await page.getByRole('button', { name: '重试本回合' }).click()
   await expect.poll(() => retried).toBe(true)

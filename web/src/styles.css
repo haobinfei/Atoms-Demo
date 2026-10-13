@@ -461,21 +461,6 @@ body {
   font-size: var(--fs-xs);
 }
 
-/* Offered in place of the composer when a 回合 failed, so the retry is next
-   to the timeline that explains what broke. */
-.ws-retry {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  padding: var(--sp-3);
-  border: 1px solid var(--c-border-strong);
-  border-radius: var(--r-md);
-  background: var(--c-surface-2);
-  font-size: var(--fs-xs);
-  color: var(--c-text-dim);
-}
-
 /* Shown while a 回合 is running: the cancel sits next to the progress it
    stops, and next to the queue that a cancel deliberately leaves alone. */
 .ws-cancel-bar {
@@ -2350,4 +2335,121 @@ select {
   .ws-timeline { border-right: 0; border-bottom: 1px solid var(--border); }
   .files-drawer { width: 100vw; }
   .fd-body { grid-template-columns: 120px 1fr; }
+}
+
+/* ---------- 工作台分栏：固定比例 + 可折叠 ---------- */
+
+/* Which pane the user needs changes with what they are doing, so each one can
+   take the whole body in one click. Declared after the stacked mobile default
+   so the collapse wins there too. */
+.ws-body--chat,
+.ws-body--preview {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+.ws-body--chat .ws-preview,
+.ws-body--preview .ws-timeline {
+  display: none;
+}
+
+.ws-body--chat .ws-timeline {
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.ws-layout {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.ws-actions .ws-layout button {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  border-radius: var(--r-sm);
+  color: var(--c-text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.ws-actions .ws-layout button:hover {
+  color: var(--c-text);
+}
+
+.ws-actions .ws-layout button.on {
+  background: var(--c-surface-3);
+  color: var(--c-accent);
+}
+
+/* ---------- 工作台四态：加载 / 空 / 断线 / 失败 ---------- */
+
+/* 断线 and 回合失败 sit above the split so they stay visible whichever pane
+   is maximised. */
+.ws-notices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4) 0;
+}
+
+.ws-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.ws-state-title {
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.ws-state-detail {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-dim);
+}
+
+/* 加载 and a failed load take over the body, so they centre rather than hug
+   the top of an otherwise empty workspace. */
+.workspace > .ws-state {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  margin: var(--sp-6);
+}
+
+.ws-state--offline {
+  border-color: var(--c-accent);
+}
+
+.ws-state--failed {
+  border-color: var(--c-danger);
+}
+
+.ws-state--failed .ws-state-title {
+  color: var(--c-danger);
+}
+
+/* 空: nothing has happened in this 会话 yet. */
+.ws-state--empty {
+  border-style: dashed;
+  background: none;
+}
+
+@media (max-width: 560px) {
+  /* The three pane buttons share the second row with 发布/代码/导出, so they
+     wrap rather than squeeze the row out of shape. */
+  .ws-actions { flex-wrap: wrap; }
 }

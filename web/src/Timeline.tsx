@@ -1,7 +1,7 @@
 import { Fragment } from 'react'
 import type { SessionEvent } from './api'
 import { persona } from './agents'
-import { groupTurns, summariseTurn, type TimelineTurn } from './turns'
+import { groupTurns, stageLabel, summariseTurn, type TimelineTurn } from './turns'
 
 const TYPE_LABEL: Record<string, string> = {
   plan: '制定计划',
@@ -18,15 +18,6 @@ const TYPE_LABEL: Record<string, string> = {
   agent: '工作中',
 }
 
-const STAGE_LABEL: Record<string, string> = {
-  plan: '需求拆解',
-  spec: '产品规格',
-  architecture: '架构设计',
-  generate: '代码生成',
-  write: '文件写入',
-  build: '构建',
-}
-
 function detail(ev: SessionEvent): string {
   const p = ev.payload ?? {}
   return (p.detail as string) ?? (p.path as string) ?? (p.message as string) ?? ''
@@ -34,9 +25,7 @@ function detail(ev: SessionEvent): string {
 
 // Where the turn broke, in words the user can place.
 function stageOf(ev: SessionEvent): string {
-  const stage = (ev.payload?.stage as string) ?? ''
-  if (!stage) return ''
-  return STAGE_LABEL[stage] ?? stage
+  return stageLabel((ev.payload?.stage as string) ?? '')
 }
 
 // What to do about it. The raw provider error is not actionable on its own.
@@ -109,6 +98,16 @@ function TurnBody({ turn }: { turn: TimelineTurn }) {
 // session that has been revised several times still reads as "here is what I
 // asked for, here is what changed".
 export default function Timeline({ events, prompt }: { events: SessionEvent[]; prompt: string }) {
+  // Nothing has happened yet. Saying so beats rendering an empty first 回合
+  // whose only content is a spinner (ticket #34).
+  if (events.length === 0) {
+    return (
+      <div className="ws-state ws-state--empty" role="status">
+        <div className="ws-state-title">还没有任何进展</div>
+        <p className="ws-state-detail">智能体团队开始工作后，这里会按回合显示每一步。</p>
+      </div>
+    )
+  }
   const turns = groupTurns(events, prompt)
   return (
     <div className="timeline">
