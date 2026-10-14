@@ -17,11 +17,13 @@ test('a finished build gives its dashboard card a screenshot cover', async ({ pa
   expect(sessionId).toBeTruthy()
 
   // The upload is fire-and-forget after the frame paints, so poll for it
-  // rather than assuming a fixed delay.
+  // rather than assuming a fixed delay. page.request (not the bare request
+  // fixture) because the session is a cookie: only the context-bound client
+  // carries it — the isolated request fixture answers 401.
   await expect
     .poll(
       async () => {
-        const resp = await request.get(`/api/sessions/${sessionId}/thumbnail`)
+        const resp = await page.request.get(`/api/sessions/${sessionId}/thumbnail`)
         return resp.status()
       },
       { timeout: 30_000, intervals: [500] },
@@ -29,7 +31,7 @@ test('a finished build gives its dashboard card a screenshot cover', async ({ pa
     .toBe(200)
 
   // What lands is a real PNG, not an error page that happens to render.
-  const shot = await request.get(`/api/sessions/${sessionId}/thumbnail`)
+  const shot = await page.request.get(`/api/sessions/${sessionId}/thumbnail`)
   expect(shot.headers()['content-type']).toContain('image/png')
   expect(shot.headers()['cache-control']).toBe('no-store')
   const body = await shot.body()
