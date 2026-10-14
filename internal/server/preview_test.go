@@ -44,12 +44,16 @@ func TestPreviewServesBuiltApp(t *testing.T) {
 	js.Body.Close()
 
 	// The preview iframe reloads these URLs after every build; stale cached
-	// bundles would render an outdated app, so responses must be revalidated.
-	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
-		t.Fatalf("index Cache-Control = %q, want no-cache", cc)
+	// bundles would render an outdated app. no-store, not no-cache: HTTP dates
+	// have one-second granularity, so a same-second rebuild produces an
+	// identical Last-Modified and a no-cache revalidation answers 304 — the
+	// stale bundle wins. TestAppAssetsSurviveASameSecondRebuild pins that
+	// behavior end to end.
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("index Cache-Control = %q, want no-store", cc)
 	}
-	if cc := js.Header.Get("Cache-Control"); cc != "no-cache" {
-		t.Fatalf("bundle Cache-Control = %q, want no-cache", cc)
+	if cc := js.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("bundle Cache-Control = %q, want no-store", cc)
 	}
 
 	// index.html carries the per-build storage namespace so an early

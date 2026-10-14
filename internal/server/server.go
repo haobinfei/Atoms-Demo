@@ -692,14 +692,46 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	// Dist filenames are not content-hashed, and the preview iframe reloads
 	// the same URLs after every build. Without an explicit policy browsers
 	// fall back to heuristic caching and keep serving the pre-rebuild
-	// bundle, so the preview shows a stale app. no-cache forces a
-	// revalidation round-trip: unchanged files still get a cheap 304.
-	w.Header().Set("Cache-Control", "no-cache")
+	// bundle, so the preview shows a stale app.
+	//
+	// no-store, not no-cache: HTTP dates have one-second granularity, so a
+	// rebuild that lands in the same second as the previous one produces an
+	// identical Last-Modified, and no-cache turns the browser's conditional
+	// request into a 304 that keeps the old bundle (verified with curl:
+	// rewrite within the same second -> 304; mtime +10s -> 200). no-store
+	// makes the browser re-fetch every time, which is cheap for the single
+	// user watching one preview.
+	w.Header().Set("Cache-Control", "no-store")
 	if rel == "" {
 		s.servePreviewIndex(w, r, full)
 		return
 	}
-	http.ServeFile(w, r, full)
+	s.servePreviewAsset(w, r, full)
+}
+
+// servePreviewAsset streams a dist asset without mtime-based conditional
+// handling. http.ServeFile would answer If-Modified-Since with 304 whenever
+// the file's mtime is not newer than the validator — and because HTTP dates
+// have one-second granularity, a rebuild that lands in the same second as the
+// previous one produces an identical Last-Modified and is 304'd back into
+// staleness. That is exactly how the preview ended up serving a pre-rebuild
+// bundle after a successful save. A zero modtime makes ServeContent skip the
+// precondition entirely: every request gets the current bytes, Range still
+// works for the media assets, and the no-store header above keeps well-behaved
+// clients from caching at all.
+func (s *Server) servePreviewAsset(w http.ResponseWriter, r *http.Request, full string) {
+	f, err := os.Open(full)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not built yet")
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "not built yet")
+		return
+	}
+	http.ServeContent(w, r, filepath.Base(full), time.Time{}, f)
 }
 
 // handleArtifactApp serves the same public /app surface from the shared
@@ -736,7 +768,10 @@ func (s *Server) handleArtifactApp(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	defer obj.Body.Close()
-	w.Header().Set("Cache-Control", "no-cache")
+	// no-store for the same reason as the local dist path: a build activated
+	// one second after its predecessor must not be masked by a same-second
+	// 304. The ETag/Last-Modified below stay for observability.
+	w.Header().Set("Cache-Control", "no-store")
 	if rel == "index.html" {
 		body, err := io.ReadAll(obj.Body)
 		if err != nil {
@@ -832,6 +867,12 @@ func (s *Server) servePreviewIndexBody(w http.ResponseWriter, body []byte, ns st
 	} else {
 		out = append(append([]byte{}, injection...), body...)
 	}
+	// The index is the entry point of every reload; it must never be served
+	// from a cached copy, or the iframe re-runs the previous bundle. Both the
+	// local dist path and the artifact path funnel through here, so setting
+	// the policy once covers both. no-store (not no-cache) because HTTP date
+	// granularity lets a same-second rebuild be 304'd back into staleness.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(out)
 }

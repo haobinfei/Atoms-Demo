@@ -1098,7 +1098,11 @@ body {
   background: var(--c-overlay);
   display: flex;
   justify-content: flex-end;
-  z-index: 20;
+  /* Above the sticky app-header (z 50): the drawer is modal, and on mobile
+     the header wraps to two rows (~94px tall) — under it, the drawer's own
+     toolbar lands in the header's band and every button click is
+     intercepted by the nav. */
+  z-index: 60;
 }
 
 .files-drawer {
@@ -1130,7 +1134,12 @@ body {
 .fd-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 240px 1fr;
+  /* minmax(0, 1fr), not 1fr: a grid track defaults to min-width:auto, so the
+     min-content width of a long pre-formatted source line blows the view
+     column out past the drawer (measured 899px inside a 389px drawer at
+     390px viewport) and pushes the toolbar buttons off-screen. minmax lets
+     the track shrink and the children scroll instead. */
+  grid-template-columns: 240px minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -1168,12 +1177,14 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
 
 .fd-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
 }
@@ -1181,6 +1192,12 @@ body {
 .fd-toolbar code {
   font-size: var(--fs-sm);
   color: var(--text-dim);
+  /* A deep path must ellipsize, never push the action button out of a
+     narrow drawer. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fd-toolbar button {
@@ -1191,6 +1208,8 @@ body {
   padding: 4px 12px;
   font-size: var(--fs-xs);
   cursor: pointer;
+  /* The toolbar shrinks on mobile; the action must stay tappable. */
+  flex: 0 0 auto;
 }
 
 .fd-view pre {
@@ -2340,7 +2359,7 @@ select {
   .ws-body { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 1fr) minmax(280px, 1fr); }
   .ws-timeline { border-right: 0; border-bottom: 1px solid var(--border); }
   .files-drawer { width: 100vw; }
-  .fd-body { grid-template-columns: 120px 1fr; }
+  .fd-body { grid-template-columns: 120px minmax(0, 1fr); }
 }
 
 /* ---------- 工作台分栏：固定比例 + 可折叠 ---------- */
@@ -2540,7 +2559,7 @@ select {
 /* ---------- 代码抽屉：搜索、行号与着色 ---------- */
 /* The search box lives above the list, so the column owns the divider and the
    scrolling rather than the list itself. */
-.fd-side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--c-border); }
+.fd-side { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid var(--c-border); }
 .fd-list { border-right: 0; flex: 1; }
 
 .fd-search {
