@@ -241,6 +241,35 @@ func matchesObjectPrefix(key, prefix string) bool {
 	return key == prefix || strings.HasPrefix(key, prefix+"/")
 }
 
+// List enumerates every object under prefix. It matches the same namespace
+// semantics as DeletePrefix, so the two agree on what a prefix contains, and
+// it reports LastModified because that is the only age the store has for a
+// build.
+func (c *cosBackend) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	pager := s3.NewListObjectsV2Paginator(c.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	})
+	out := make([]ObjectInfo, 0)
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("COS list prefix %s: %w", prefix, err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key == nil || !matchesObjectPrefix(*obj.Key, prefix) {
+				continue
+			}
+			info := ObjectInfo{Key: *obj.Key}
+			if obj.LastModified != nil {
+				info.ModTime = *obj.LastModified
+			}
+			out = append(out, info)
+		}
+	}
+	return out, nil
+}
+
 func (c *cosBackend) copySource(key string) string {
 	parts := strings.Split(key, "/")
 	for i := range parts {
