@@ -2597,3 +2597,56 @@ select {
   font-size: var(--fs-sm);
   line-height: 1.7;
 }
+
+/* ---------- 浅色主题 ---------- */
+/* 旧 token（--bg / --panel / --text / --dim / --border / --accent）全部是
+   --c-* 的别名，所以重定义这一套就是整个切换。 */
+:root { color-scheme: dark; }
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --c-bg: #f4f5f7;
+  --c-surface-1: #ffffff;
+  --c-surface-2: #ffffff;
+  --c-surface-3: #f1f3f7;
+  --c-border: #e3e6eb;
+  --c-border-strong: #c9cfd9;
+
+  --c-text: #1b1f27;
+  --c-text-dim: #58616f;
+  --c-text-muted: #878f9d;
+
+  /* 更深一档的橙：白字压在上面的对比度才够 */
+  --c-accent: #c2410c;
+  --c-accent-hover: #9a3412;
+  --c-accent-soft: rgba(194, 65, 12, 0.12);
+  --c-on-accent: #ffffff;
+
+  --c-success: #15803d;
+  --c-success-soft: rgba(21, 128, 61, 0.10);
+  --c-danger: #b91c1c;
+  --c-danger-soft: rgba(185, 28, 28, 0.10);
+
+  --c-code-comment: #6b7280;
+  --c-code-string: #15803d;
+  --c-code-number: #b45309;
+  --c-code-keyword: #6d28d9;
+
+  --c-overlay: rgba(15, 23, 42, 0.45);
+  --sh-1: 0 1px 2px rgba(15, 23, 42, 0.07);
+  --sh-2: 0 6px 20px rgba(15, 23, 42, 0.10);
+  --sh-pop: 0 12px 40px rgba(15, 23, 42, 0.18);
+}
+
+/* ---------- 账户菜单里的主题选择 ---------- */
+.menu-section {
+  display: flex;
+  flex-direction: column;
+  margin: var(--sp-1) 0;
+  padding: var(--sp-1) 0;
+  border-top: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
+}
+.menu-section-title { padding: 4px 10px; color: var(--c-text-muted); font-size: var(--fs-xs); }
+.menu-panel button.is-checked { color: var(--c-accent); }

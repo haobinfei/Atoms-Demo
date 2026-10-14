@@ -4,6 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Atoms Demo</title>
+    <script>
+      // Runs before the bundle so the first paint is already the right theme
+      // instead of flashing the other one. Same key and same rule as
+      // src/theme.ts — keep them in step.
+      ;(() => {
+        try {
+          const choice = localStorage.getItem('atoms-theme')
+          const light =
+            choice === 'light' ||
+            (choice !== 'dark' && matchMedia('(prefers-color-scheme: light)').matches)
+          document.documentElement.dataset.theme = light ? 'light' : 'dark'
+        } catch {
+          document.documentElement.dataset.theme = 'dark'
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
