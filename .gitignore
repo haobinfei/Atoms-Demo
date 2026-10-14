@@ -5,3 +5,8 @@ workspace/
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
+
+# 本地工作记录，不是项目产物。忽略它还有第二个作用：一旦它被提交，
+# 切回不含那些文件的分支时 git 会把它们从工作区删掉——这正是本仓库
+# 曾经丢失 .workbuddy/ 的原因。
+.workbuddy/
