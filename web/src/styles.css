@@ -1985,62 +1985,19 @@ select {
   opacity: 0.82;
 }
 
-.dash-cover-frame {
+/* 截图封面（#56）：一张图填满封面，网格底纹只服务于无图时的字母占位。*/
+.dash-cover-img {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
-  background: var(--c-surface-1);
-}
-
-.dash-cover-frame iframe {
+  z-index: 1;
   width: 100%;
   height: 100%;
-  border: 0;
-  pointer-events: none;
-  transform: scale(1.01);
-  /* Hold the frame invisible until it has painted, so the loading note is
-     replaced by the app rather than by a blank white box. */
-  opacity: 0;
-  transition: opacity var(--dur) var(--ease);
+  object-fit: cover;
+  display: block;
 }
 
-.dash-cover-frame.is-loaded iframe {
-  opacity: 1;
-}
-
-.dash-cover-loading {
-  position: absolute;
-  font-size: var(--fs-xs);
-  color: var(--c-text-muted);
-}
-
-.dash-cover-live {
-  position: absolute !important;
-  right: 10px;
-  bottom: 10px;
-  z-index: 4 !important;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: var(--r-full);
-  background: rgba(15, 17, 21, 0.72);
-  color: #fff;
-  font-size: 10px !important;
-  font-weight: 600 !important;
-  text-shadow: none !important;
-  backdrop-filter: blur(6px);
-}
-
-.dash-cover-live::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--c-success);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+.dash-cover--shot::after {
+  display: none;
 }
 
 .cover-todo { background: var(--cover-todo); }

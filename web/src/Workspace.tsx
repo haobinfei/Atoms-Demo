@@ -17,6 +17,7 @@ import Preview from './Preview'
 import PublishPanel from './PublishPanel'
 import Timeline from './Timeline'
 import ContestPanel from './ContestPanel'
+import { captureAndUpload } from './thumbnail'
 import { lastFailure } from './turns'
 
 const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主题改成橙色']
@@ -105,6 +106,18 @@ export default function Workspace({
   const onFileSaved = () => {
     setBuiltAt(new Date().toISOString())
     void getSession(sessionId).then(setSession).catch(() => {})
+  }
+
+  // The dashboard cover is a screenshot of the preview, taken here because
+  // this is the only place the frame is mounted and still (ticket #56). The
+  // frame remounts on every build, so each finished build re-captures.
+  //
+  // Two guards: a frame that loads while the session is 构建中 is the previous
+  // build (the new one gets its own load event when it is ready), and a
+  // contest review frame shows a candidate version, not this session's app.
+  const onFrameLoaded = (frame: HTMLIFrameElement) => {
+    if (busy || reviewVersion) return
+    void captureAndUpload(sessionId, frame).catch(() => {})
   }
 
   // Load persisted history, then follow the live event stream.
@@ -591,6 +604,7 @@ export default function Workspace({
                     ready={session?.previewReady ?? false}
                     published={published}
                     src={reviewVersion ? `/app/${sessionId}/contest/${reviewVersion}/` : undefined}
+                    onFrameLoaded={onFrameLoaded}
                   />
                 </>
               )}

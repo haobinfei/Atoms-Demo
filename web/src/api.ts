@@ -374,3 +374,15 @@ export async function getChange(id: string, seq: number): Promise<ChangeDetail> 
   if (!resp.ok) throw new Error(`get change: ${resp.status}`)
   return (await resp.json()) as ChangeDetail
 }
+
+// putThumbnail uploads the dashboard cover screenshot (ticket #56). The body
+// is the PNG exactly as the browser captured it; the server checks the magic
+// bytes itself rather than trusting this header.
+export async function putThumbnail(id: string, blob: Blob): Promise<void> {
+  const resp = await fetch(`/api/sessions/${id}/thumbnail`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'image/png' },
+    body: blob,
+  })
+  if (!resp.ok) throw new Error(`put thumbnail: ${resp.status}`)
+}

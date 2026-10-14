@@ -4,6 +4,7 @@ package server
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -461,6 +462,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/sessions/{id}/file/{path...}", s.handlePutFile)
 	mux.HandleFunc("GET /api/sessions/{id}/changes", s.handleListChanges)
 	mux.HandleFunc("GET /api/sessions/{id}/changes/{seq}", s.handleGetChange)
+	mux.HandleFunc("PUT /api/sessions/{id}/thumbnail", s.handlePutThumbnail)
+	mux.HandleFunc("GET /api/sessions/{id}/thumbnail", s.handleGetThumbnail)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
 	mux.HandleFunc("POST /api/pay/orders", s.handlePayCreate)
 	mux.HandleFunc("GET /api/pay/orders", s.handlePayList)
@@ -1130,6 +1133,115 @@ func (s *Server) handleGetChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rec)
+}
+
+// maxThumbnailBytes bounds a cover screenshot (ticket #56). The browser
+// captures the preview frame at the pane's own size, so a real screenshot is
+// a few hundred kilobytes; anything larger is not one.
+const maxThumbnailBytes = 1 << 20
+
+// pngMagic is the signature every PNG starts with. These bytes are written
+// straight to disk, so the type is checked on the body, never trusted from
+// the Content-Type header.
+var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+
+// thumbnailPath resolves a session's cover screenshot inside its workspace,
+// next to the app, dist and 改动记录 files. Derived state: nothing about it
+// is persisted in the session record (the 交付边界 forbids that).
+func (s *Server) thumbnailPath(user, id string) (string, error) {
+	ws, err := s.workspaceDir(user, id)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(ws, "thumbnail.png"), nil
+}
+
+// handlePutThumbnail stores the dashboard cover screenshot for a session.
+// The capture happens in the browser: the preview frame is same-origin, so
+// foreignObject + canvas can read it, and no headless browser is involved
+// (docs/design §8.1 依赖政策).
+//
+// The Load is the membership check — a session that does not live under the
+// caller's current workspace answers 404, exactly like the file editor.
+func (s *Server) handlePutThumbnail(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxThumbnailBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cannot read the image")
+		return
+	}
+	if len(raw) == 0 {
+		writeError(w, http.StatusBadRequest, "empty image")
+		return
+	}
+	if len(raw) > maxThumbnailBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "image is too large")
+		return
+	}
+	if !bytes.HasPrefix(raw, pngMagic) {
+		writeError(w, http.StatusBadRequest, "only PNG screenshots are accepted")
+		return
+	}
+	dst, err := s.thumbnailPath(user, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Write-then-rename: a concurrent reader must never see a half-written
+	// cover.
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleGetThumbnail serves the cover screenshot. It is member-scoped like
+// the dashboard list it feeds: the route lives under /api, so anonymous
+// callers are already rejected by the identity middleware, and a session
+// outside the caller's workspace is a 404 rather than someone else's cover.
+//
+// no-store because the cover changes with every build while the URL stays
+// the same; a re-fetch is one small file.
+func (s *Server) handleGetThumbnail(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	path, err := s.thumbnailPath(user, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no cover yet")
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "no cover yet")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, f)
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
