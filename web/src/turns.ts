@@ -6,8 +6,10 @@ export interface TimelineTurn {
   // 本轮目标: the prompt for the first turn, the follow-up message after that.
   goal: string
   events: SessionEvent[]
-  // Paths written during this turn, in the order they were announced.
-  files: string[]
+  // The 文件 (file) events of this turn, in the order they were announced.
+  // Each carries the seq its 改动记录 is keyed to and the agent that wrote it,
+  // which is how the page tells an Agent's rewrite from a 用户手改 (ticket #54).
+  fileEvents: SessionEvent[]
   status: 'building' | 'ready' | 'failed'
   // Set when the user aborted this turn (取消回合). A cancelled turn is 就绪,
   // not 失败, and its outcome line must not read like a completed build.
@@ -31,7 +33,7 @@ export function groupTurns(events: SessionEvent[], prompt: string): TimelineTurn
       key: `turn-${turns.length + 1}`,
       goal: goal.trim() || '（未填写需求）',
       events: [],
-      files: [],
+      fileEvents: [],
       status: 'building',
       canceled: false,
       failedStage: '',
@@ -48,8 +50,7 @@ export function groupTurns(events: SessionEvent[], prompt: string): TimelineTurn
     const turn = turns[turns.length - 1]
     turn.events.push(ev)
     if (ev.type === 'file') {
-      const path = (ev.payload?.path as string) ?? ''
-      if (path) turn.files.push(path)
+      turn.fileEvents.push(ev)
     } else if (ev.type === 'done') {
       turn.status = ((ev.payload?.status as string) ?? 'ready') as TimelineTurn['status']
       turn.canceled = ev.payload?.canceled === true
@@ -66,8 +67,8 @@ export function summariseTurn(turn: TimelineTurn): string {
   if (turn.canceled) return '本轮已取消，保留上一版'
   if (turn.status === 'failed') return '本轮失败'
   if (turn.status === 'building') return '进行中…'
-  if (turn.files.length === 0) return '本轮完成'
-  return `本轮完成，修改了 ${turn.files.length} 个文件`
+  if (turn.fileEvents.length === 0) return '本轮完成'
+  return `本轮完成，修改了 ${turn.fileEvents.length} 个文件`
 }
 
 // 回合 stages, in words the user can place. The server sends the stage id.

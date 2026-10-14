@@ -4,9 +4,11 @@ import {
   chatSession,
   getSession,
   isAuthError,
+  listChanges,
   openEventStream,
   redirectToLogin,
   retrySession,
+  type ChangeRecord,
   type Session,
   type SessionEvent,
 } from './api'
@@ -55,6 +57,9 @@ export default function Workspace({
   const [session, setSession] = useState<Session | null>(null)
   const [events, setEvents] = useState<SessionEvent[]>([])
   const [builtAt, setBuiltAt] = useState('')
+  // 改动记录 (Change Records) keyed to their 文件 event seq, so the timeline
+  // can attach a diff to each row it renders (ticket #54).
+  const [changes, setChanges] = useState<ChangeRecord[]>([])
   const [filesOpen, setFilesOpen] = useState(false)
   const [publishOpen, setPublishOpen] = useState(false)
   const [layout, setLayout] = useState<Layout>('split')
@@ -202,6 +207,30 @@ export default function Workspace({
       if (watchdog) clearInterval(watchdog)
     }
   }, [sessionId])
+
+  // The 改动记录 are refetched whenever a 文件 or 完成 event lands: a 回合
+  // writes its records after announcing its files, and a 手改's record
+  // arrives with its own event (ticket #54). A failed fetch keeps the old
+  // list — the rows still render, they just have no diff to open yet.
+  const changeTrigger = (() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i]
+      if (ev.type === 'file' || ev.type === 'done') return ev.seq
+    }
+    return 0
+  })()
+  useEffect(() => {
+    let alive = true
+    listChanges(sessionId).then(
+      (list) => {
+        if (alive) setChanges(list)
+      },
+      () => {},
+    )
+    return () => {
+      alive = false
+    }
+  }, [sessionId, changeTrigger])
 
   // Tick every second while building so the elapsed time updates.
   useEffect(() => {
@@ -438,7 +467,12 @@ export default function Workspace({
           <div className={`ws-body ws-body--${layout}`}>
             <aside className="ws-timeline">
               <div className="ws-timeline-scroll">
-                <Timeline events={events} prompt={session?.prompt ?? ''} />
+                <Timeline
+                  sessionId={sessionId}
+                  events={events}
+                  prompt={session?.prompt ?? ''}
+                  changes={changes}
+                />
               </div>
               <div className="ws-chat">
                 {session?.status === 'building' && (

@@ -1,6 +1,7 @@
-import { Fragment } from 'react'
-import type { SessionEvent } from './api'
+import { Fragment, useState } from 'react'
+import type { ChangeRecord, SessionEvent } from './api'
 import { persona } from './agents'
+import FileDiff from './FileDiff'
 import { groupTurns, stageLabel, summariseTurn, type TimelineTurn } from './turns'
 
 const TYPE_LABEL: Record<string, string> = {
@@ -33,25 +34,73 @@ function hintOf(ev: SessionEvent): string {
   return (ev.payload?.hint as string) ?? ''
 }
 
-// A turn's file writes collapse into one line: a build announces dozens of
-// paths, and listing them inline buries everything else in the turn.
-function TurnFiles({ files }: { files: string[] }) {
-  if (files.length === 0) return null
+// A turn's file writes collapse into one list: a build announces dozens of
+// paths, and listing them inline buries everything else in the turn. Each row
+// says who wrote the file — an Agent's rewrite or a 用户手改 — and opens that
+// file's diff (ticket #54).
+function TurnFiles({
+  sessionId,
+  turn,
+  changes,
+}: {
+  sessionId: string
+  turn: TimelineTurn
+  changes: Map<number, ChangeRecord>
+}) {
+  const [openSeq, setOpenSeq] = useState<number | null>(null)
+  if (turn.fileEvents.length === 0) return null
+
+  // A record saying 未变 is not a change; a file with no record yet (the
+  // 回合 is still writing) counts as changed until proven otherwise.
+  const changed = turn.fileEvents.filter((ev) => {
+    const rec = changes.get(ev.seq)
+    return !rec || rec.kind !== 'unchanged'
+  })
+  const unchanged = turn.fileEvents.length - changed.length
+
   return (
     <details className="tl-files">
-      <summary>修改了 {files.length} 个文件</summary>
+      <summary>
+        修改了 {changed.length} 个文件
+        {unchanged > 0 && <span className="tl-files-note">，{unchanged} 个内容未变</span>}
+      </summary>
       <ul>
-        {files.map((path) => (
-          <li key={path}>
-            <code>{path}</code>
-          </li>
-        ))}
+        {changed.map((ev) => {
+          const path = (ev.payload?.path as string) ?? ''
+          const hand = ev.agent === 'user'
+          const rec = changes.get(ev.seq)
+          return (
+            <li key={ev.seq} className="tl-file-row">
+              <button
+                className="tl-file-toggle"
+                aria-expanded={openSeq === ev.seq}
+                onClick={() => setOpenSeq(openSeq === ev.seq ? null : ev.seq)}
+              >
+                <code>{path}</code>
+                <span className={`tl-author tl-author--${hand ? 'user' : 'agent'}`}>
+                  {hand ? '用户手改' : 'Agent 改动'}
+                </span>
+                {rec && (
+                  <span className="tl-file-stat">
+                    +{rec.added} −{rec.removed}
+                  </span>
+                )}
+              </button>
+              {openSeq === ev.seq &&
+                (rec ? (
+                  <FileDiff sessionId={sessionId} record={rec} />
+                ) : (
+                  <div className="fd-note">这个文件的改动记录还没写入，稍后再打开试试。</div>
+                ))}
+            </li>
+          )
+        })}
       </ul>
     </details>
   )
 }
 
-function TurnBody({ turn }: { turn: TimelineTurn }) {
+function TurnBody({ sessionId, turn, changes }: { sessionId: string; turn: TimelineTurn; changes: Map<number, ChangeRecord> }) {
   return (
     <>
       {turn.events.map((ev, i) => {
@@ -89,7 +138,7 @@ function TurnBody({ turn }: { turn: TimelineTurn }) {
           </Fragment>
         )
       })}
-      <TurnFiles files={turn.files} />
+      <TurnFiles sessionId={sessionId} turn={turn} changes={changes} />
     </>
   )
 }
@@ -97,7 +146,19 @@ function TurnBody({ turn }: { turn: TimelineTurn }) {
 // Timeline renders the 事件流 as 回合 rather than as one flat list, so a
 // session that has been revised several times still reads as "here is what I
 // asked for, here is what changed".
-export default function Timeline({ events, prompt }: { events: SessionEvent[]; prompt: string }) {
+export default function Timeline({
+  sessionId,
+  events,
+  prompt,
+  changes,
+}: {
+  sessionId: string
+  events: SessionEvent[]
+  prompt: string
+  // 改动记录 keyed by the 文件 event seq they belong to (ticket #54). Rows
+  // without a record still list; they just have no diff to open yet.
+  changes: ChangeRecord[]
+}) {
   // Nothing has happened yet. Saying so beats rendering an empty first 回合
   // whose only content is a spinner (ticket #34).
   if (events.length === 0) {
@@ -109,6 +170,7 @@ export default function Timeline({ events, prompt }: { events: SessionEvent[]; p
     )
   }
   const turns = groupTurns(events, prompt)
+  const bySeq = new Map(changes.map((rec) => [rec.seq, rec]))
   return (
     <div className="timeline">
       {turns.map((turn, i) => (
@@ -118,7 +180,7 @@ export default function Timeline({ events, prompt }: { events: SessionEvent[]; p
             <div className="tl-user-bubble">{turn.goal}</div>
           </div>
           <div className="tl-turn-body">
-            <TurnBody turn={turn} />
+            <TurnBody sessionId={sessionId} turn={turn} changes={bySeq} />
             {turn.status === 'building' && <div className="tl-typing">智能体团队工作中…</div>}
           </div>
           <div className={`tl-turn-result tl-turn-result--${turn.canceled ? 'canceled' : turn.status}`}>

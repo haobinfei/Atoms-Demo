@@ -15,6 +15,7 @@ import (
 
 	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/changes"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
@@ -35,17 +36,22 @@ type Pipeline struct {
 	// Artifacts stores each successful build as an immutable snapshot and
 	// activates it for /app. nil keeps the legacy local dist behavior.
 	Artifacts *artifact.Store
+	// Changes records what each write changed, so the workspace can list a
+	// 回合's files with per-file diffs (ticket #54). nil disables recording
+	// (unit tests that only exercise the model calls).
+	Changes *changes.Store
 	// StepDelay keeps the timeline human-readable in demos; tests may shrink it.
 	StepDelay time.Duration
 }
 
-func (p *Pipeline) emit(owner, id string, ev session.Event) {
+func (p *Pipeline) emit(owner, id string, ev session.Event) session.Event {
 	appended, err := p.Store.AppendEvent(owner, id, ev)
 	if err != nil {
 		slog.Error("append event", "session", id, "type", ev.Type, "err", err)
-		return
+		return session.Event{}
 	}
 	p.PublishEvent(id, appended)
+	return appended
 }
 
 // PublishEvent fans an event the Store already persisted out to live SSE
@@ -129,7 +135,10 @@ func (p *Pipeline) EmitUserMessage(owner, id string, msg session.Message) {
 // leave a trace there: which file changed, and whether the rebuild took. It
 // reuses the 文件 (file) event type rather than inventing one, because that is
 // exactly what happened — one file of the app changed (ticket #53).
-func (p *Pipeline) EmitFileEdited(owner, id, path string, rebuilt bool, buildError string) {
+//
+// It returns the appended event so the caller can key the edit's 改动记录 to
+// the same seq the timeline shows (ticket #54).
+func (p *Pipeline) EmitFileEdited(owner, id, path string, rebuilt bool, buildError string) session.Event {
 	payload := map[string]any{
 		"path":    path,
 		"edited":  true,
@@ -140,7 +149,7 @@ func (p *Pipeline) EmitFileEdited(owner, id, path string, rebuilt bool, buildErr
 		payload["buildError"] = buildError
 		payload["detail"] = "手动编辑已保存，但重建失败"
 	}
-	p.emit(owner, id, session.Event{Type: "file", Agent: "user", Payload: payload})
+	return p.emit(owner, id, session.Event{Type: "file", Agent: "user", Payload: payload})
 }
 
 func (p *Pipeline) EmitContestStatus(owner, id, stage, detail string) {
@@ -280,7 +289,7 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 		}
 		p.emit(owner, id, session.Event{Type: "error", Payload: payload})
 	}
-	files, stage, err := p.run(ctx, owner, id)
+	out, stage, err := p.run(ctx, owner, id)
 	if errors.Is(err, errCanceled) {
 		p.finishCanceled(owner, id)
 		return
@@ -290,8 +299,8 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 		status = "failed"
 		fail(stage, err)
 	}
-	if files != nil {
-		if err := p.writeFiles(owner, id, files); err != nil {
+	if out.files != nil {
+		if err := p.writeFiles(owner, id, out.files, out.seqs); err != nil {
 			status = "failed"
 			fail(StageWrite, err)
 		} else if p.Builder != nil {
@@ -321,7 +330,7 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 	// The summary lands before "done" so that a client that has seen done
 	// can rely on all session writes being complete (tests clean up
 	// workspaces on done; a trailing write would race the cleanup).
-	p.appendTurnSummary(owner, id, status, files, err)
+	p.appendTurnSummary(owner, id, status, out.files, err)
 	p.emit(owner, id, session.Event{Type: "done", Agent: "sarah", Payload: map[string]any{
 		"status": status,
 		"detail": "补充 SEO 元信息：title、description、og 标签",
@@ -344,15 +353,23 @@ func (p *Pipeline) appendTurnSummary(owner, id, status string, files provider.Fi
 	}
 }
 
+// turnResult pairs the generated file set with the seq of each file's 文件
+// (file) event, so writeFiles can key its 改动记录 to the exact event the
+// timeline shows (ticket #54).
+type turnResult struct {
+	files provider.FileSet
+	seqs  map[string]int
+}
+
 // run executes the 流水线 stages and reports which stage failed, so Run can
 // label the error event. An empty stage means the failure was not inside a
 // stage (e.g. the session could not be loaded). A 取消回合 (Cancel Turn)
 // request is reported as errCanceled, which Run turns into a 就绪 session
 // rather than a failure.
-func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet, string, error) {
+func (p *Pipeline) run(ctx context.Context, owner, id string) (turnResult, string, error) {
 	sess, err := p.Store.Load(owner, id)
 	if err != nil {
-		return nil, "", err
+		return turnResult{}, "", err
 	}
 	step := func(agent, typ, detail string) error {
 		if p.canceled(owner, id) {
@@ -371,13 +388,13 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 	}
 
 	if err := step("mike", "plan", "拆解需求并制定执行计划"); err != nil {
-		return nil, StagePlan, err
+		return turnResult{}, StagePlan, err
 	}
 	if err := step("emma", "spec", fmt.Sprintf("为「%s」整理产品规格", sess.Prompt)); err != nil {
-		return nil, StageSpec, err
+		return turnResult{}, StageSpec, err
 	}
 	if err := step("bob", "architecture", "设计系统结构：React + TypeScript，组件化组织"); err != nil {
-		return nil, StageArchitecture, err
+		return turnResult{}, StageArchitecture, err
 	}
 
 	// Current-version files feed the augmented prompt (ADR-0003); missing
@@ -394,14 +411,14 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 		}
 	})
 	if err != nil {
-		return nil, StageGenerate, err
+		return turnResult{}, StageGenerate, err
 	}
 	// Checked after 生成 and before the file events: a turn commits at
 	// writeFiles, so aborting here is what keeps the previous version whole.
 	// The 生成 call itself is the longest step, so this is the point where a
 	// cancel has the most to save.
 	if p.canceled(owner, id) {
-		return nil, "", errCanceled
+		return turnResult{}, "", errCanceled
 	}
 	// The pipeline alone announces file writes, uniformly for every
 	// 生成引擎 (chain, single LLM provider, or test fake).
@@ -410,13 +427,19 @@ func (p *Pipeline) run(ctx context.Context, owner, id string) (provider.FileSet,
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	// Each 文件 event's seq is kept, so the 改动记录 written by writeFiles
+	// joins to the exact row the timeline renders (ticket #54).
+	seqs := make(map[string]int, len(files))
 	for _, path := range paths {
-		p.emit(owner, id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": path}})
+		appended := p.emit(owner, id, session.Event{Type: "file", Agent: "alex", Payload: map[string]any{"path": path}})
+		if appended.Seq > 0 {
+			seqs[path] = appended.Seq
+		}
 	}
-	return files, "", nil
+	return turnResult{files: files, seqs: seqs}, "", nil
 }
 
-func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet) error {
+func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet, seqs map[string]int) error {
 	// The AtomsPay SDK is platform-owned: inject it into every app so a
 	// 生成引擎's ecommerce app can import './atomspay' even though the
 	// model never emits the file itself. Non-shop apps never import it
@@ -434,11 +457,33 @@ func (p *Pipeline) writeFiles(owner, id string, files provider.FileSet) error {
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return err
 		}
+		// The previous content is read before the write: it is the only
+		// chance to know what this 回合 changed, and the 改动记录 is what
+		// turns "N files were written" into a per-file diff (ticket #54).
+		old, err := os.ReadFile(full)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 			return err
 		}
+		p.recordChange(owner, id, seqs[path], path, string(old), content)
 	}
 	return nil
+}
+
+// recordChange files one 改动记录 (Change Record) for a write, keyed to the
+// 文件 (file) event's seq so the timeline can attach a diff to the exact row
+// it shows. Recording is best effort: the 事件流 stays the source of truth
+// for "a file changed", and a failed record only costs the diff (ticket #54).
+func (p *Pipeline) recordChange(owner, id string, seq int, path, old, new string) {
+	if p.Changes == nil || seq <= 0 {
+		return
+	}
+	rec := changes.NewRecord(seq, path, changes.AuthorAgent, old, new)
+	if err := p.Changes.Append(owner, id, rec); err != nil {
+		slog.Warn("append change record", "session", id, "path", path, "err", err)
+	}
 }
 
 // dropArtifacts removes the active build after a failed turn, matching the

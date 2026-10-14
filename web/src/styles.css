@@ -825,6 +825,120 @@ body {
   color: var(--c-text);
 }
 
+/* ---------- 每回合文件清单与差异（#54） ---------- */
+.tl-files-note {
+  margin-left: 6px;
+  color: var(--c-text-muted);
+}
+
+.tl-file-row {
+  padding: 2px 0;
+}
+
+.tl-file-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tl-file-toggle:hover {
+  background: var(--c-surface-2);
+}
+
+/* 谁改的：Agent 改动与用户手改必须一眼可分（#54）。 */
+.tl-author {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.tl-author--agent {
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+
+.tl-author--user {
+  background: var(--c-success-soft);
+  color: var(--c-success);
+}
+
+.tl-file-stat {
+  flex: none;
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* 差异说明与降级提示：二进制、超大、未变、加载中都说同一句话的格式。 */
+.fd-note {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  color: var(--c-text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.fd-diff-wrap {
+  margin: 4px 0 10px;
+}
+
+.fd-diff {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  line-height: 1.65;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* 一行一个 span：pre 的换行由块级元素承担，不需要文本里的 \n。 */
+.fd-diff span {
+  display: block;
+}
+
+.fd-diff-add {
+  background: var(--c-success-soft);
+  color: var(--c-success);
+}
+
+.fd-diff-del {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.fd-diff-hunk {
+  color: var(--c-text-muted);
+}
+
+.fd-diff-file {
+  color: var(--c-text-dim);
+  font-weight: 600;
+}
+
+.fd-diff-meta {
+  color: var(--c-text-muted);
+}
+
 .tl-agent {
   display: flex;
   align-items: center;

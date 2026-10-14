@@ -22,6 +22,7 @@ import (
 
 	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/changes"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/identity"
 	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
@@ -102,11 +103,15 @@ type Server struct {
 	store     session.Store
 	cfg       Config
 	artifacts *artifact.Store
-	bus       eventstream.Bus
-	queue     jobqueue.Queue
-	pipeline  *pipeline.Pipeline
-	builder   *builder.Builder
-	payStore  *pay.Store
+	// changes records what every write changed, so the workspace can list
+	// a 回合's files with per-file diffs (ticket #54). It lives on the same
+	// workspace disk as app/ and dist/, so both store deployments share it.
+	changes  *changes.Store
+	bus      eventstream.Bus
+	queue    jobqueue.Queue
+	pipeline *pipeline.Pipeline
+	builder  *builder.Builder
+	payStore *pay.Store
 
 	// cancel stops the Worker pool and the recovery sweeper; closeOnce makes
 	// Close idempotent.
@@ -179,6 +184,7 @@ func New(cfg Config) *Server {
 	}
 	host, _ := os.Hostname()
 	build := builder.New()
+	changeStore := changes.NewStore(cfg.WorkspaceDir)
 	s := &Server{
 		store:    store,
 		cfg:      cfg,
@@ -191,9 +197,11 @@ func New(cfg Config) *Server {
 			Prov:      prov,
 			Builder:   build,
 			Artifacts: artifacts,
+			Changes:   changeStore,
 			StepDelay: stepDelay,
 		},
 		artifacts:       artifacts,
+		changes:         changeStore,
 		builder:         build,
 		leaseTTL:        leaseTTL,
 		sweepInterval:   sweepInterval,
@@ -451,6 +459,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
 	mux.HandleFunc("PUT /api/sessions/{id}/file/{path...}", s.handlePutFile)
+	mux.HandleFunc("GET /api/sessions/{id}/changes", s.handleListChanges)
+	mux.HandleFunc("GET /api/sessions/{id}/changes/{seq}", s.handleGetChange)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
 	mux.HandleFunc("POST /api/pay/orders", s.handlePayCreate)
 	mux.HandleFunc("GET /api/pay/orders", s.handlePayList)
@@ -998,6 +1008,13 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
+	// The previous content is the "before" half of this edit's 改动记录
+	// (ticket #54); it is only readable until the write below lands.
+	old, err := os.ReadFile(full)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	// Keep the existing mode: generated output is not a place to widen
 	// permissions from.
 	if err := os.WriteFile(full, []byte(req.Content), info.Mode().Perm()); err != nil {
@@ -1014,7 +1031,13 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		buildMessage = buildErr.Error()
 		slog.Warn("rebuild after hand edit", "session", id, "path", rel, "err", buildErr)
 	}
-	s.pipeline.EmitFileEdited(user, id, filepath.ToSlash(rel), rebuilt, buildMessage)
+	appended := s.pipeline.EmitFileEdited(user, id, filepath.ToSlash(rel), rebuilt, buildMessage)
+	// The 改动记录 is keyed to the event the timeline just received, so the
+	// diff joins to the exact row that announced this edit (ticket #54).
+	// Best effort: the event is the source of truth for "a file changed".
+	if err := s.changes.Append(user, id, changes.NewRecord(appended.Seq, filepath.ToSlash(rel), changes.AuthorUser, string(old), req.Content)); err != nil {
+		slog.Warn("append hand-edit change record", "session", id, "path", rel, "err", err)
+	}
 
 	out := map[string]any{"path": filepath.ToSlash(rel), "rebuilt": rebuilt}
 	if buildMessage != "" {
@@ -1054,6 +1077,59 @@ func (s *Server) rebuild(ctx context.Context, user, id, appDir string) (rebuilt 
 		return false, fmt.Errorf("store build: %w", err)
 	}
 	return true, nil
+}
+
+// handleListChanges returns a session's 改动记录 (Change Records) as
+// summaries — no diff bodies. The timeline lists a 回合's files from this and
+// fetches one diff at a time, when the user opens a file: a turn's diffs are
+// far too much to ship to every render (ticket #54).
+//
+// The session is loaded first so another workspace's id answers 404 rather
+// than an empty list, matching every other session-scoped route.
+func (s *Server) handleListChanges(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	recs, err := s.changes.List(user, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]changes.Summary, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, rec.Summary())
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGetChange returns one 改动记录 with its diff. A binary or oversized
+// record answers with its flags and no diff, so the page can say "已改动"
+// without ever holding a body it cannot render (ticket #54).
+func (s *Server) handleGetChange(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	seq, err := strconv.Atoi(r.PathValue("seq"))
+	if err != nil || seq <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid change seq")
+		return
+	}
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	rec, ok, err := s.changes.Detail(user, id, seq)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "change not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
