@@ -450,6 +450,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
+	mux.HandleFunc("PUT /api/sessions/{id}/file/{path...}", s.handlePutFile)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
 	mux.HandleFunc("POST /api/pay/orders", s.handlePayCreate)
 	mux.HandleFunc("GET /api/pay/orders", s.handlePayList)
@@ -891,6 +892,127 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		"path":    filepath.ToSlash(r.PathValue("path")),
 		"content": string(data),
 	})
+}
+
+// maxEditableFileBytes bounds a hand edit. This is a source editor, not a file
+// transfer: every file a build produces is far below this.
+const maxEditableFileBytes = 512 << 10
+
+// handlePutFile saves a hand edit to one generated file and rebuilds, so the
+// preview and /app serve the edit (ticket #53).
+//
+// This is the only route that writes generated code from the outside, so it
+// re-states every rule instead of trusting the client:
+//   - the session must belong to the caller (appDir resolves through the
+//     workspace partition) and must not be mid-turn — a write racing a 回合
+//     would be overwritten by that 回合's own file writes, or silently win
+//     against them;
+//   - the path must resolve inside the app dir (safeJoin) and must already
+//     exist: creating paths from here would turn a code editor into a file
+//     manager, and every file a build can produce is already on disk;
+//   - the body is bounded.
+//
+// A failed rebuild is reported as a failed rebuild, not as a failed write: the
+// file is on disk either way, so the caller is told which of the two happened
+// rather than left to guess from a 500.
+func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+
+	sess, err := s.store.Load(user, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.Status == "building" {
+		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxEditableFileBytes+1)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	if len(req.Content) > maxEditableFileBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "file is too large to edit here")
+		return
+	}
+
+	appDir, err := s.appDir(user, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rel := r.PathValue("path")
+	full, err := safeJoin(appDir, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	// Keep the existing mode: generated output is not a place to widen
+	// permissions from.
+	if err := os.WriteFile(full, []byte(req.Content), info.Mode().Perm()); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Rebuild so the edit is what the preview and /app serve. A build id is
+	// immutable and activated only at the end, so a failed rebuild leaves the
+	// previous version live rather than half-swapped.
+	rebuilt, buildErr := s.rebuild(r.Context(), user, id, appDir)
+	buildMessage := ""
+	if buildErr != nil {
+		buildMessage = buildErr.Error()
+		slog.Warn("rebuild after hand edit", "session", id, "path", rel, "err", buildErr)
+	}
+	s.pipeline.EmitFileEdited(user, id, filepath.ToSlash(rel), rebuilt, buildMessage)
+
+	out := map[string]any{"path": filepath.ToSlash(rel), "rebuilt": rebuilt}
+	if buildMessage != "" {
+		out["buildError"] = buildMessage
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// rebuild compiles the session's app dir into a fresh dist and activates it for
+// /app and the preview. rebuilt=false means nothing changed the live version:
+// either there is no builder configured (local dist mode) or the build failed,
+// in which case err explains why.
+func (s *Server) rebuild(ctx context.Context, user, id, appDir string) (rebuilt bool, err error) {
+	if s.builder == nil {
+		return false, nil
+	}
+	ws, err := s.workspaceDir(user, id)
+	if err != nil {
+		return false, err
+	}
+	distDir := filepath.Join(ws, "dist")
+	if err := s.builder.Build(appDir, distDir); err != nil {
+		// Deliberately NOT removing distDir, unlike the 回合 path. A turn that
+		// fails leaves the session "failed", so serving nothing is the honest
+		// state. A hand edit that fails to compile leaves the session ready and
+		// its last good build on disk — that is exactly the way back the ticket
+		// asks for. esbuild only writes its outputs once compilation succeeds,
+		// so the previous build is intact.
+		return false, err
+	}
+	if s.artifacts == nil {
+		return true, nil
+	}
+	// A multi-replica /app reads the shared store, so an upload failure means
+	// the edit is not live anywhere but this replica.
+	if _, err := s.artifacts.PutTree(ctx, artifact.SessionPrefix(id), distDir); err != nil {
+		return false, fmt.Errorf("store build: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {

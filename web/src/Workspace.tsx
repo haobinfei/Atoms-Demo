@@ -94,6 +94,14 @@ export default function Workspace({
     setBuiltAt(new Date().toISOString())
   }
 
+  // A saved hand edit is a new build, so the preview has to remount on it the
+  // way a finished 回合 makes it remount. There is no turn seq to compare
+  // against here, so this bumps the frame key directly (ticket #53).
+  const onFileSaved = () => {
+    setBuiltAt(new Date().toISOString())
+    void getSession(sessionId).then(setSession).catch(() => {})
+  }
+
   // Load persisted history, then follow the live event stream.
   useEffect(() => {
     let source: EventSource | null = null
@@ -556,7 +564,12 @@ export default function Workspace({
           </div>
         </>
       )}
-      <FilesDrawer sessionId={sessionId} open={filesOpen} onClose={() => setFilesOpen(false)} />
+      <FilesDrawer
+        sessionId={sessionId}
+        open={filesOpen}
+        onClose={() => setFilesOpen(false)}
+        onSaved={onFileSaved}
+      />
       {publishOpen && (
         <PublishPanel sessionId={sessionId} onClose={() => setPublishOpen(false)} />
       )}

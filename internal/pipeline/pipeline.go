@@ -124,6 +124,25 @@ func (p *Pipeline) EmitUserMessage(owner, id string, msg session.Message) {
 
 // EmitContestStatus announces one 竞赛 (Competition) stage on the timeline:
 // start / a contestant ready / a contestant failed / the winner.
+// EmitFileEdited records a hand edit to one generated file. The 事件流 is the
+// timeline's single source of truth, so an edit made outside a 回合 still has to
+// leave a trace there: which file changed, and whether the rebuild took. It
+// reuses the 文件 (file) event type rather than inventing one, because that is
+// exactly what happened — one file of the app changed (ticket #53).
+func (p *Pipeline) EmitFileEdited(owner, id, path string, rebuilt bool, buildError string) {
+	payload := map[string]any{
+		"path":    path,
+		"edited":  true,
+		"rebuilt": rebuilt,
+		"detail":  "手动编辑并重建",
+	}
+	if buildError != "" {
+		payload["buildError"] = buildError
+		payload["detail"] = "手动编辑已保存，但重建失败"
+	}
+	p.emit(owner, id, session.Event{Type: "file", Agent: "user", Payload: payload})
+}
+
 func (p *Pipeline) EmitContestStatus(owner, id, stage, detail string) {
 	p.emit(owner, id, session.Event{Type: "contest", Agent: "nina", Payload: map[string]any{
 		"stage":  stage,

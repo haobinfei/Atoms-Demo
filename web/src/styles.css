@@ -2650,3 +2650,30 @@ select {
 }
 .menu-section-title { padding: 4px 10px; color: var(--c-text-muted); font-size: var(--fs-xs); }
 .menu-panel button.is-checked { color: var(--c-accent); }
+
+/* 手改代码（#53）：编辑器与查看器共用同一个位置，所以尺寸对齐 fd-code。*/
+.fd-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-panel);
+  color: var(--c-text);
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+.fd-editor:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+.fd-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--c-dim);
+}
