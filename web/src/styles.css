@@ -2677,3 +2677,11 @@ select {
   margin-top: 6px;
   color: var(--c-dim);
 }
+.fd-saved {
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--c-accent) 12%, transparent);
+  color: var(--c-text);
+  font-size: 12.5px;
+}

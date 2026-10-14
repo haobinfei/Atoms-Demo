@@ -29,10 +29,15 @@ export default function FilesDrawer({
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [buildError, setBuildError] = useState('')
+  // A clean save used to be silent, which left the user unable to tell a save
+  // that worked from one that never fired.
+  const [saved, setSaved] = useState(false)
+  const savedTimer = useRef<number | null>(null)
 
   useEffect(() => {
     return () => {
       if (copyTimer.current !== null) clearTimeout(copyTimer.current)
+      if (savedTimer.current !== null) clearTimeout(savedTimer.current)
     }
   }, [])
 
@@ -109,6 +114,10 @@ export default function FilesDrawer({
       if (!out.rebuilt && out.buildError) {
         // The write landed; the app did not compile. Say both.
         setBuildError(out.buildError)
+      } else {
+        setSaved(true)
+        if (savedTimer.current !== null) clearTimeout(savedTimer.current)
+        savedTimer.current = window.setTimeout(() => setSaved(false), 4000)
       }
       onSaved?.()
       void listFiles(sessionId).then(setFiles).catch(() => {})
@@ -214,6 +223,11 @@ export default function FilesDrawer({
                         <span className="fd-hint">
                           文件已经写进工程，可以点「编辑」修好再保存；预览和 /app 仍在上一次构建的版本上。
                         </span>
+                      </div>
+                    )}
+                    {saved && (
+                      <div className="fd-saved" role="status">
+                        已保存并重建，预览已刷新。
                       </div>
                     )}
                     <div className="fd-code" role="group" aria-label="源码">

@@ -20,7 +20,10 @@ test('hand-edit a file, save, and watch the preview rebuild', async ({ page, req
   await page.getByRole('button', { name: '编辑' }).click()
   await editor.fill('export default function App(){ return <main>手改标记A</main> }')
   await page.getByRole('button', { name: '保存并重建' }).click()
-  // Saving leaves the editor and comes back to the highlighted view.
+  // Assert the save's own outcome first. Without this, a rebuild that failed
+  // and a preview that did not reload both surface as the same "old preview"
+  // failure further down.
+  await expect(page.locator('.fd-saved')).toBeVisible({ timeout: 60_000 })
   await expect(page.locator('.fd-editor')).toBeHidden({ timeout: 60_000 })
   await expect(preview.locator('main')).toContainText('手改标记A', { timeout: 60_000 })
 

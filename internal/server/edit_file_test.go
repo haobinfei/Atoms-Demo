@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -75,7 +76,10 @@ func TestPutFileRebuildsAndRecordsTheEdit(t *testing.T) {
 	id := createSession(t, ts.URL, "一家咖啡店的电商网站")
 	readSSEUntilDone(t, ts.URL+"/api/sessions/"+id+"/events", 0, 40)
 
-	const edited = "export default function App(){ return <main>手动改过</main> }"
+	// ASCII on purpose: esbuild escapes non-ASCII into \uXXXX in the bundle, so
+	// a CJK marker could not be found in the built output even when the rebuild
+	// worked.
+	const edited = "export default function App(){ return <main>HAND_EDITED_MARKER</main> }"
 	status, out := putFile(t, ts.URL, id, "src/App.tsx", edited)
 	if status != http.StatusOK {
 		t.Fatalf("put status = %d, want 200 (%v)", status, out)
@@ -104,15 +108,54 @@ func TestPutFileRebuildsAndRecordsTheEdit(t *testing.T) {
 		t.Fatalf("no 编辑 file event on the stream: %+v", events)
 	}
 
-	// /app still serves a build (the rebuilt one).
-	resp, err := http.Get(ts.URL + "/app/" + id + "/")
+	// /app must serve the REBUILT output, not just some build: follow the
+	// bundle the page references and look for the edit inside it. Asserting
+	// only "200" would pass even if the rebuild never reached the preview, which
+	// is exactly the failure this test is here to prevent.
+	page := getBody(t, ts.URL+"/app/"+id+"/")
+	bundle := regexp.MustCompile(`src="([^"]+\.js)"`).FindStringSubmatch(page)
+	if bundle == nil {
+		t.Fatalf("no bundle referenced by the built page: %s", page)
+	}
+	js := getBody(t, ts.URL+resolveAppAsset(ts.URL, id, bundle[1]))
+	if !strings.Contains(js, "HAND_EDITED_MARKER") {
+		snippet := js
+		if len(snippet) > 600 {
+			snippet = snippet[:600]
+		}
+		t.Fatalf("the bundle /app serves does not carry the edit (%s, %d bytes): %s",
+			bundle[1], len(js), snippet)
+	}
+}
+
+// resolveAppAsset turns a bundle reference from a built page into a URL to
+// fetch. Built pages reference "./main.js"; an absolute or rooted reference is
+// already fetchable.
+func resolveAppAsset(base, id, ref string) string {
+	if strings.HasPrefix(ref, "http") {
+		return ref
+	}
+	if strings.HasPrefix(ref, "/") {
+		return ref
+	}
+	return "/app/" + id + "/" + strings.TrimPrefix(ref, "./")
+}
+
+func getBody(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
 	if err != nil {
-		t.Fatalf("get app: %v", err)
+		t.Fatalf("get %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("/app status = %d, want 200", resp.StatusCode)
+		t.Fatalf("get %s = %d, want 200", url, resp.StatusCode)
 	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return string(raw)
 }
 
 // TestPutFileRefusedWhileBuilding protects the 回合's own file writes: an edit
