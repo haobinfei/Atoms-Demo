@@ -76,7 +76,9 @@ test('演示路径：登录 → 生成 → 刷新 → 排队 → 取消 → 追�
     await page.locator('.ws-chat-form textarea').press('Enter')
 
     // The precondition of this step: the refresh really does land mid-build.
-    await expect(page.locator('.ws-status')).toHaveText('构建中')
+    // The badge states the phase and how long it has been in it (排队中 Ns /
+    // 构建中 Ns), so the assertion is the phase, not one exact string.
+    await expect(page.locator('.ws-status')).toHaveText(/^(排队中|构建中) \d+s$/)
     await expect(page.locator('.tl-item.tl-plan').nth(1)).toBeVisible({ timeout: 60_000 })
 
     await page.reload()
@@ -88,7 +90,7 @@ test('演示路径：登录 → 生成 → 刷新 → 排队 → 取消 → 追�
     await expect(page.locator('.tl-item.tl-plan').nth(1)).toBeVisible()
     // ...the 构建状态 is the real one rather than a blank, and the 回合 carries
     // on to completion from where the refresh found it.
-    await expect(page.locator('.ws-status')).toHaveText(/构建中|构建完成/)
+    await expect(page.locator('.ws-status')).toHaveText(/^(排队中|构建中) \d+s$|^构建完成$/)
     await expect(page.locator('.tl-turn-result').nth(1)).toContainText('本轮完成', {
       timeout: 90_000,
     })
@@ -97,7 +99,7 @@ test('演示路径：登录 → 生成 → 刷新 → 排队 → 取消 → 追�
   await test.step('4 构建中提交追问：消息进入排队，不打断当前回合', async () => {
     await page.locator('.ws-chat-form textarea').fill(LAYOUT_TWEAK)
     await page.locator('.ws-chat-form textarea').press('Enter')
-    await expect(page.locator('.ws-status')).toHaveText('构建中')
+    await expect(page.locator('.ws-status')).toHaveText(/^(排队中|构建中) \d+s$/)
 
     await page.locator('.ws-chat-form textarea').fill(THEME)
     await page.locator('.ws-chat-form textarea').press('Enter')
