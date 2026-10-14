@@ -4,8 +4,17 @@ import Auth from './Auth'
 import Home from './Home'
 import { AccountSettings, AdminSettings, TeamSettings, Workspaces } from './Management'
 import Workspace from './Workspace'
+import { apply, readChoice, save, watchSystem, type ThemeChoice } from './theme'
 
 type Page = 'projects' | 'workspaces' | 'team' | 'account' | 'admin'
+
+// Offered in the account menu rather than the header: the theme is a personal
+// preference, and the header already carries the workspace controls.
+const THEME_OPTIONS = [
+  ['system', '跟随系统'],
+  ['light', '浅色'],
+  ['dark', '深色'],
+] as const
 
 export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(() => new URLSearchParams(location.search).get('s'))
@@ -19,6 +28,19 @@ export default function App() {
   const [noticeError, setNoticeError] = useState(false)
   const [inviteToken, setInviteToken] = useState(() => new URLSearchParams(location.search).get('invite'))
   const [menuOpen, setMenuOpen] = useState(false)
+  const [theme, setTheme] = useState<ThemeChoice>(() => readChoice())
+
+  // The choice is already on <html> from index.html; this keeps it there when
+  // the choice changes and while "follow the system" is in effect.
+  useEffect(() => {
+    apply(theme)
+    return watchSystem(theme, () => apply(theme))
+  }, [theme])
+
+  function chooseTheme(next: ThemeChoice) {
+    save(next)
+    setTheme(next)
+  }
 
   async function refresh() {
     const next = await getMe()
@@ -105,6 +127,20 @@ export default function App() {
               <div className="menu-header">{account.email}</div>
               <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('account') }}>账户设置</button>
               <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('workspaces') }}>工作区</button>
+              <div className="menu-section">
+                <span className="menu-section-title">主题</span>
+                {THEME_OPTIONS.map(([value, label]) => (
+                  <button
+                    key={value}
+                    role="menuitemradio"
+                    aria-checked={theme === value}
+                    className={theme === value ? 'is-checked' : ''}
+                    onClick={() => chooseTheme(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <button role="menuitem" className="is-danger" onClick={() => { setMenuOpen(false); void signOut() }}>退出登录</button>
             </div>
           </>
