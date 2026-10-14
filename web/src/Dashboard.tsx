@@ -9,6 +9,7 @@ import {
   renameSession,
   type SessionSummary,
 } from './api'
+import { relativeTime } from './relativeTime'
 
 const CATEGORY_LABEL: Record<string, string> = {
   todo: '待办',
@@ -245,7 +246,9 @@ export default function Dashboard({
               ) : (
                 <span className="dash-name">{sess.name}</span>
               )}
-              <time className="dash-time">{new Date(sess.updatedAt).toLocaleString()}</time>
+              <time className="dash-time" dateTime={sess.updatedAt}>
+                {relativeTime(sess.updatedAt)}
+              </time>
             </button>
             <div className="dash-actions">
               <button
