@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     lease_until TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- queued_at 在入队时记录，started_at 在 Worker 认领执行时记录；两者之差
+    -- 就是用户在状态徽章上看到的排队时长（生产迁移见 gitops 0005）。
+    queued_at   TIMESTAMPTZ,
+    started_at  TIMESTAMPTZ,
     publishes   JSONB NOT NULL DEFAULT '[]'::jsonb,
     contest     JSONB,
     kind        TEXT NOT NULL DEFAULT ''

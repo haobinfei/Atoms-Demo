@@ -70,15 +70,18 @@ func (p *PGStore) Create(owner, prompt string) (*Session, error) {
 		Status:     "building",
 		LeaseOwner: LeasePending,
 		LeaseUntil: until,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Messages:   []Message{{Role: "user", Content: prompt, At: now}},
-		Events:     []Event{},
-		Publishes:  []Publish{},
+		// A new session is created already queued: its first turn is enqueued
+		// by the same request, so queued_at starts the clock here.
+		QueuedAt:  &now,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
+		Events:    []Event{},
+		Publishes: []Publish{},
 	}
 	_, err = p.pool.Exec(context.Background(),
-		`INSERT INTO sessions (id, owner, name, prompt, status, lease_owner, lease_until, created_at, updated_at)
-		 VALUES ($1, $2, $3, $3, 'building', $5, $6, $4, $4)`, id, owner, prompt, now, LeasePending, until)
+		`INSERT INTO sessions (id, owner, name, prompt, status, lease_owner, lease_until, queued_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $3, 'building', $5, $6, $4, $4, $4)`, id, owner, prompt, now, LeasePending, until)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
@@ -307,13 +310,14 @@ func (p *PGStore) BeginTurn(owner, id, kind string) (prev string, ok bool, err e
 	if prev == "building" {
 		return "building", false, nil
 	}
-	// Record the Job kind and a pending lease in the same write as the
-	// status flip (see FileStore.BeginTurn).
-	until := time.Now().Add(defaultClaimTTL)
+	// Record the Job kind, a pending lease, and the queue timestamp in the
+	// same write as the status flip (see FileStore.BeginTurn).
+	now := time.Now()
+	until := now.Add(defaultClaimTTL)
 	if _, err := tx.Exec(ctx,
 		`UPDATE sessions SET status='building', kind=$3, lease_owner=$4, lease_until=$5,
-		 updated_at=now() WHERE owner=$1 AND id=$2`,
-		owner, id, kind, LeasePending, until); err != nil {
+		 queued_at=$6, started_at=NULL, updated_at=now() WHERE owner=$1 AND id=$2`,
+		owner, id, kind, LeasePending, until, now); err != nil {
 		return "", false, err
 	}
 	return prev, true, tx.Commit(ctx)
@@ -331,7 +335,7 @@ func (p *PGStore) SetJobKind(owner, id, kind string) error {
 func (p *PGStore) ClaimLease(owner, id, holder string, ttl time.Duration) (bool, error) {
 	until := time.Now().Add(ttl)
 	tag, err := p.pool.Exec(context.Background(),
-		`UPDATE sessions SET lease_owner=$3, lease_until=$4, updated_at=now()
+		`UPDATE sessions SET lease_owner=$3, lease_until=$4, started_at=now(), updated_at=now()
 		  WHERE owner=$1 AND id=$2 AND status='building'
 		    AND (lease_owner IS NULL OR lease_until IS NULL OR lease_until <= now()
 		         OR ($3 <> $5 AND lease_owner = $5))`,

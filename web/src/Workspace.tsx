@@ -68,6 +68,9 @@ export default function Workspace({
   const [sending, setSending] = useState(false)
   const [retrying, setRetrying] = useState(false)
   const [canceling, setCanceling] = useState(false)
+  // Ticks every second while building to refresh the elapsed time shown in the
+  // status badge (ticket #57).
+  const [, setTick] = useState(0)
   // Follow-ups typed while a 回合 was running. They wait for it to finish
   // rather than interrupting it (ticket #29).
   const [queue, setQueue] = useState<string[]>([])
@@ -134,6 +137,12 @@ export default function Workspace({
             // score cards and entry statuses stay in sync.
             void getSession(sessionId).then(setSession).catch(() => {})
           }
+          if (ev.type === 'plan') {
+            // The 回合's first stage means a Worker claimed the session and
+            // started executing it; refetch so the status badge can switch
+            // from 排队中 to 构建中 with the server's own startedAt (ticket #57).
+            void getSession(sessionId).then(setSession).catch(() => {})
+          }
         }
         source.onerror = () => {
           // EventSource auto-reconnects. Surfaced rather than swallowed: a
@@ -186,8 +195,27 @@ export default function Workspace({
     }
   }, [sessionId])
 
-  const statusLabel =
-    session?.status === 'ready' ? '构建完成' : session?.status === 'failed' ? '构建失败' : '构建中'
+  // Tick every second while building so the elapsed time updates.
+  useEffect(() => {
+    if (session?.status !== 'building') return
+    const timer = setInterval(() => setTick((t) => t + 1), 1000)
+    return () => clearInterval(timer)
+  }, [session?.status])
+
+  const statusLabel = (() => {
+    if (session?.status === 'ready') return '构建完成'
+    if (session?.status === 'failed') return '构建失败'
+    // building: show queue time if still queued, execution time if claimed.
+    if (session?.startedAt) {
+      const elapsed = Math.floor((Date.now() - new Date(session.startedAt).getTime()) / 1000)
+      return `构建中 ${elapsed}s`
+    }
+    if (session?.queuedAt) {
+      const queued = Math.floor((Date.now() - new Date(session.queuedAt).getTime()) / 1000)
+      return `排队中 ${queued}s`
+    }
+    return '构建中'
+  })()
 
   async function sendChat(text: string) {
     const msg = text.trim()
@@ -200,6 +228,9 @@ export default function Workspace({
       // The SSE stream delivers the message event and the new turn; flip
       // the status immediately so the UI feels responsive.
       setSession((prev) => (prev ? { ...prev, status: 'building' } : prev))
+      // Pick up the queue timestamp the server just recorded, so the badge
+      // can say 排队中 with a real clock rather than waiting for the next poll.
+      void getSession(sessionId).then(setSession).catch(() => {})
     } catch (err) {
       if (isAuthError(err)) {
         redirectToLogin()
@@ -289,6 +320,7 @@ export default function Workspace({
       // Flip immediately: the retry re-enters the ordinary turn path, so what
       // follows is the same event sequence a chat turn produces.
       setSession((prev) => (prev ? { ...prev, status: 'building' } : prev))
+      void getSession(sessionId).then(setSession).catch(() => {})
     } catch (err) {
       if (isAuthError(err)) {
         redirectToLogin()

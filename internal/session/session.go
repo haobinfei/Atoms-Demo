@@ -47,12 +47,16 @@ type Session struct {
 	// replica) or the sweeper must not run it concurrently.
 	LeaseOwner string    `json:"leaseOwner,omitempty"`
 	LeaseUntil time.Time `json:"leaseUntil,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	Events     []Event   `json:"events"`
-	Messages   []Message `json:"messages"`
-	Publishes  []Publish `json:"publishes"`
-	Contest    *Contest  `json:"contest,omitempty"`
+	// QueuedAt records when BeginTurn enqueued this turn, and StartedAt when a
+	// Worker began executing it. The gap is the wait time users see as "queued".
+	QueuedAt  *time.Time `json:"queuedAt,omitempty"`
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	Events    []Event    `json:"events"`
+	Messages  []Message  `json:"messages"`
+	Publishes []Publish  `json:"publishes"`
+	Contest   *Contest   `json:"contest,omitempty"`
 }
 
 // Scores are Nina's three-dimension verdict on one contest version.
@@ -135,9 +139,12 @@ func (s *FileStore) Create(owner, prompt string) (*Session, error) {
 		Status:     "building",
 		LeaseOwner: LeasePending,
 		LeaseUntil: now.Add(defaultClaimTTL),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Messages:   []Message{{Role: "user", Content: prompt, At: now}},
+		// A new session is created already queued: its first turn is enqueued
+		// by the same request, so queued_at starts the clock here.
+		QueuedAt:  &now,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Messages:  []Message{{Role: "user", Content: prompt, At: now}},
 		// Events must be a (possibly empty) array, never JSON null: the
 		// workspace reads sess.events.length while the first turn is
 		// still running, and a null would throw before the SSE stream
@@ -304,12 +311,15 @@ func (s *FileStore) BeginTurn(owner, id, kind string) (prev string, ok bool, err
 	}
 	prev = sess.Status
 	sess.Status = "building"
-	// Record the Job kind and a pending lease in the same write as the
-	// status flip, so a crash right after the claim is still recoverable
-	// and the sweeper does not race the enqueue→execute window.
+	// Record the Job kind, a pending lease, and the queue timestamp in the
+	// same write as the status flip, so a crash right after the claim is still
+	// recoverable and the sweeper does not race the enqueue→execute window.
+	now := time.Now()
 	sess.Kind = kind
 	sess.LeaseOwner = LeasePending
-	sess.LeaseUntil = time.Now().Add(defaultClaimTTL)
+	sess.LeaseUntil = now.Add(defaultClaimTTL)
+	sess.QueuedAt = &now
+	sess.StartedAt = nil
 	if err := s.saveLocked(sess); err != nil {
 		return "", false, err
 	}
@@ -391,6 +401,7 @@ func (s *FileStore) ClaimLease(owner, id, holder string, ttl time.Duration) (boo
 	}
 	sess.LeaseOwner = holder
 	sess.LeaseUntil = now.Add(ttl)
+	sess.StartedAt = &now
 	return true, s.saveLocked(sess)
 }
 

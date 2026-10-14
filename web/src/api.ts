@@ -61,6 +61,11 @@ export interface Session {
   // Derived server-side per request: whether /app/{id}/ currently has a
   // servable build. A rendering hint only, never an authorization signal.
   previewReady: boolean
+  // When the session first entered the queue (present if status is building).
+  queuedAt?: string
+  // When a worker claimed the session and began execution (present while a
+  // worker has the lease).
+  startedAt?: string
 }
 
 export async function createSession(prompt: string, competition = false): Promise<string> {
