@@ -111,7 +111,7 @@ func (p *PGStore) IndexOwner(id string) (string, error) {
 }
 
 const sessionSelect = `SELECT id, owner, name, prompt, category, pinned, status, kind,
-	publishes, contest, created_at, updated_at FROM sessions WHERE owner = $1 AND id = $2`
+	publishes, contest, queued_at, started_at, created_at, updated_at FROM sessions WHERE owner = $1 AND id = $2`
 
 func (p *PGStore) Load(owner, id string) (*Session, error) {
 	sess, err := p.scanSession(p.pool.QueryRow(context.Background(), sessionSelect, owner, id))
@@ -128,7 +128,8 @@ func (p *PGStore) scanSession(row pgx.Row) (*Session, error) {
 	var sess Session
 	var publishes, contest []byte
 	err := row.Scan(&sess.ID, &sess.Owner, &sess.Name, &sess.Prompt, &sess.Category,
-		&sess.Pinned, &sess.Status, &sess.Kind, &publishes, &contest, &sess.CreatedAt, &sess.UpdatedAt)
+		&sess.Pinned, &sess.Status, &sess.Kind, &publishes, &contest,
+		&sess.QueuedAt, &sess.StartedAt, &sess.CreatedAt, &sess.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -634,7 +635,7 @@ func (p *PGStore) ClearContestWinner(owner, id string) error {
 func (p *PGStore) List(owner string) ([]Session, error) {
 	rows, err := p.pool.Query(context.Background(),
 		`SELECT id, owner, name, prompt, category, pinned, status, kind,
-			publishes, contest, created_at, updated_at
+			publishes, contest, queued_at, started_at, created_at, updated_at
 		 FROM sessions WHERE owner = $1
 		 ORDER BY pinned DESC, updated_at DESC`, owner)
 	if err != nil {

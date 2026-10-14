@@ -216,3 +216,75 @@ func TestPGListOrder(t *testing.T) {
 		t.Error("A or B missing from list")
 	}
 }
+
+// Ticket #68: the timing columns must survive a round trip through Postgres.
+// The FileStore persists the whole Session as JSON, so only this layer can
+// catch a SELECT that forgets to read them back.
+func TestPGTurnTimingRoundTrip(t *testing.T) {
+	p := newPG(t)
+	const owner = "timing@example.com"
+
+	sess, err := p.Create(owner, "一个待办应用")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	loaded, err := p.Load(owner, sess.ID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.QueuedAt == nil {
+		t.Fatal("Create wrote queued_at but Load did not read it back")
+	}
+	if loaded.StartedAt != nil {
+		t.Fatal("nothing claimed the session, so started_at must be null")
+	}
+
+	if ok, err := p.ClaimLease(owner, sess.ID, "worker-1", time.Minute); err != nil || !ok {
+		t.Fatalf("ClaimLease = %v, %v; want true", ok, err)
+	}
+	claimed, err := p.Load(owner, sess.ID)
+	if err != nil {
+		t.Fatalf("load after claim: %v", err)
+	}
+	if claimed.StartedAt == nil {
+		t.Fatal("ClaimLease wrote started_at but Load did not read it back")
+	}
+
+	// A follow-up turn restarts the clock and clears the start.
+	if err := p.SetStatus(owner, sess.ID, "ready"); err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	if _, ok, err := p.BeginTurn(owner, sess.ID, "turn"); err != nil || !ok {
+		t.Fatalf("BeginTurn = %v, %v; want true", ok, err)
+	}
+	next, err := p.Load(owner, sess.ID)
+	if err != nil {
+		t.Fatalf("load after BeginTurn: %v", err)
+	}
+	if next.StartedAt != nil {
+		t.Fatal("BeginTurn left the previous turn's started_at in place")
+	}
+	if next.QueuedAt == nil || !next.QueuedAt.After(*claimed.QueuedAt) {
+		t.Fatalf("BeginTurn did not advance queued_at: %v", next.QueuedAt)
+	}
+
+	// List reads through the same scan path, so it must carry them too.
+	list, err := p.List(owner)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var found bool
+	for _, item := range list {
+		if item.ID != sess.ID {
+			continue
+		}
+		found = true
+		if item.QueuedAt == nil {
+			t.Fatal("List did not read queued_at back")
+		}
+	}
+	if !found {
+		t.Fatal("session missing from List")
+	}
+}
