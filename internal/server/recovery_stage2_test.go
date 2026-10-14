@@ -33,6 +33,31 @@ func waitForStatus(t *testing.T, store session.Store, owner, id, want string) se
 	return last
 }
 
+// waitForTurnDone polls until the 回合 has written its terminal 完成 event.
+//
+// Waiting on the status alone races the pipeline: Run flips the status to
+// "ready" first, then appends the turn summary, and only then emits 完成. A
+// caller that stops at the status can therefore read the event list one write
+// too early — which is a race in the test, not in the pipeline.
+func waitForTurnDone(t *testing.T, store session.Store, owner, id string) session.Session {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var last session.Session
+	for time.Now().Before(deadline) {
+		sess, err := store.Load(owner, id)
+		if err == nil {
+			last = *sess
+			if hasEvent(*sess, "done") {
+				return *sess
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("session %s never wrote a 完成 event within deadline (%d events): %+v",
+		id, len(last.Events), last.Events)
+	return last
+}
+
 func hasEvent(sess session.Session, typ string) bool {
 	for _, ev := range sess.Events {
 		if ev.Type == typ {
@@ -212,7 +237,10 @@ func TestRecoveryClaimPreventsDoubleRun(t *testing.T) {
 		replicas = append(replicas, s)
 	}
 
-	got := waitForStatus(t, store, owner, sess.ID, "ready")
+	got := waitForTurnDone(t, store, owner, sess.ID)
+	if got.Status != "ready" {
+		t.Fatalf("status = %q, want ready", got.Status)
+	}
 	if n := atomic.LoadInt32(&counter.calls); n != 1 {
 		t.Fatalf("Generate calls = %d, want exactly 1 (lease must prevent a double run)", n)
 	}
