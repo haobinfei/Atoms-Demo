@@ -56,29 +56,43 @@ test('a finished build gives its dashboard card a screenshot cover', async ({ pa
 test('a project that was never opened shows the cover fallback', async ({ page, request }) => {
   await registerVerifyAndLogin(page, request)
 
-  // Build a second project and leave before its preview ever mounts — the
-  // frame (and therefore the capture) only exists in the workspace.
-  await page.locator('.home-composer textarea').fill('一个设计师的作品集网站')
-  await page.getByRole('button', { name: '开始构建' }).click()
+  // Create over the API: the workspace — and therefore the capture — never
+  // opens for this project, which is exactly the state under test. Going
+  // through the composer and navigating away mid-flight is a race: a full
+  // page navigation cancels the in-flight create request, and the session
+  // may never exist (that flake cost a CI run).
+  const created = await page.request.post(`/api/sessions`, {
+    data: { prompt: '一个设计师的作品集网站' },
+    // Write requests carry a same-origin guard; a raw API client sends
+    // neither the origin header nor the fetch metadata hint, so state it.
+    headers: { 'Sec-Fetch-Site': 'same-origin' },
+  })
+  expect(created.status()).toBe(200)
+  const { sessionId } = (await created.json()) as { sessionId: string }
+  expect(sessionId).toBeTruthy()
+
+  // The build finishes server-side. Wait for it directly instead of
+  // reloading the dashboard on a timer — the dashboard does not poll, and a
+  // reload-loop wait both burns the test budget and re-races the SPA boot.
+  await expect
+    .poll(
+      async () => {
+        const resp = await page.request.get(`/api/sessions/${sessionId}`)
+        return (await resp.json()).status
+      },
+      { timeout: 90_000, intervals: [1000] },
+    )
+    .toBe('ready')
+
   await page.goto('/')
   await page.getByRole('button', { name: '我的项目' }).click()
 
   const card = page.locator('.dash-card', { hasText: '一个设计师的作品集网站' })
-  await expect(card.locator('img.dash-cover-img')).toHaveCount(0)
+  await expect(card.locator('.badge--success')).toHaveCount(1)
 
-  // The build finishes server-side; the dashboard does not poll, so reload
-  // until the card reports it.
-  await expect
-    .poll(
-      async () => {
-        await page.reload()
-        await page.getByRole('button', { name: '我的项目' }).click()
-        return card.locator('.badge--success').count()
-      },
-      { timeout: 90_000, intervals: [2000] },
-    )
-    .toBe(1)
-
+  // The cover has no screenshot to show: the card explains how one appears,
+  // and the <img> it briefly renders (previewReady is true) 404s and is
+  // replaced by that note — so both assertions retry until it settles.
   await expect(card.locator('.dash-cover small')).toHaveText('打开项目后生成封面')
   await expect(card.locator('img.dash-cover-img')).toHaveCount(0)
 })
