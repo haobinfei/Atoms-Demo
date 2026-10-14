@@ -151,3 +151,68 @@ func TestPGStoreConformance(t *testing.T) {
 		t.Fatalf("deleted session still loads")
 	}
 }
+
+// Ticket #56: recent comes first, and pinned stays above unpinned even when
+// older. This is the same rule FileStore uses (store_test covers it), but we
+// check PGStore too because the SQL ORDER BY is the only part that enforces it.
+func TestPGListOrder(t *testing.T) {
+	p := newPG(t)
+	const owner = "listorder@example.com"
+
+	a, err := p.Create(owner, "older unpinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Rename(owner, a.ID, "A"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	b, err := p.Create(owner, "newer unpinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Rename(owner, b.ID, "B"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	c, err := p.Create(owner, "oldest but pinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Rename(owner, c.ID, "C"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.SetPinned(owner, c.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := p.List(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) < 3 {
+		t.Fatalf("expected at least 3 sessions, got %d", len(list))
+	}
+	// The pinned one must be first, the other two must be newest-first.
+	if list[0].ID != c.ID || !list[0].Pinned {
+		t.Errorf("first item should be pinned C, got %s pinned=%v", list[0].ID, list[0].Pinned)
+	}
+	var foundB, foundA bool
+	for i := 1; i < len(list); i++ {
+		if list[i].ID == b.ID {
+			foundB = true
+			if foundA {
+				t.Error("B (newer) should come before A (older)")
+			}
+		}
+		if list[i].ID == a.ID {
+			foundA = true
+		}
+	}
+	if !foundB || !foundA {
+		t.Error("A or B missing from list")
+	}
+}
