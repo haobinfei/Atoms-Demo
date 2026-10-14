@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -89,4 +90,19 @@ func (m *MemoryBackend) DeletePrefix(_ context.Context, prefix string) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// List returns every object under prefix, in key order. Keys are compared the
+// same way DeletePrefix does, so the two agree on what a prefix contains.
+func (m *MemoryBackend) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]ObjectInfo, 0)
+	for key, obj := range m.objects {
+		if key == prefix || strings.HasPrefix(key, prefix+"/") {
+			out = append(out, ObjectInfo{Key: key, ModTime: obj.modTime})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }

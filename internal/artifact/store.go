@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -33,12 +34,23 @@ type Object struct {
 	ContentType string
 }
 
+// ObjectInfo is one stored object as enumeration sees it: its key, and when it
+// was written. For a build's manifest that is when the build was staged, which
+// is the only timestamp the store has for a build.
+type ObjectInfo struct {
+	Key     string
+	ModTime time.Time
+}
+
 // Backend is the low-level object API shared by COS and tests.
 type Backend interface {
 	Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
 	Get(ctx context.Context, key string) (Object, error)
 	Copy(ctx context.Context, srcKey, dstKey string) error
 	DeletePrefix(ctx context.Context, prefix string) error
+	// List returns every object under prefix. Without it the store can create
+	// builds but never enumerate them, so nothing can be collected.
+	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
 }
 
 // Store adds immutable build directories and a current pointer on top of a
@@ -385,4 +397,183 @@ func contentType(rel string) string {
 		return ct
 	}
 	return "application/octet-stream"
+}
+
+// BuildInfo describes one build a prefix holds.
+type BuildInfo struct {
+	ID       string
+	StagedAt time.Time
+}
+
+// Builds lists the builds under a prefix, newest first. A build is known by its
+// manifest, which is written once when the build is staged.
+func (s *Store) Builds(ctx context.Context, prefix string) ([]BuildInfo, error) {
+	if err := validPrefix(prefix); err != nil {
+		return nil, err
+	}
+	objects, err := s.backend.List(ctx, path.Join(prefix, "manifests"))
+	if err != nil {
+		return nil, err
+	}
+	builds := make([]BuildInfo, 0, len(objects))
+	for _, obj := range objects {
+		name := path.Base(obj.Key)
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		builds = append(builds, BuildInfo{ID: strings.TrimSuffix(name, ".json"), StagedAt: obj.ModTime})
+	}
+	sort.Slice(builds, func(i, j int) bool {
+		if builds[i].StagedAt.Equal(builds[j].StagedAt) {
+			return builds[i].ID > builds[j].ID
+		}
+		return builds[i].StagedAt.After(builds[j].StagedAt)
+	})
+	return builds, nil
+}
+
+// RetentionPolicy bounds how much build history a prefix keeps. A build
+// survives only when it is BOTH among the newest Keep and no older than
+// MaxAge: the two limits are ANDed, so either one alone can drop a build. A
+// MaxAge of zero or less means "no age limit".
+type RetentionPolicy struct {
+	Keep   int
+	MaxAge time.Duration
+}
+
+// Collection reports what one retention pass did, so a sweep that removes data
+// leaves a trace of what it removed and what it kept.
+type Collection struct {
+	Prefix  string
+	Active  string
+	Kept    []string
+	Removed []string
+}
+
+// Collect applies policy to one prefix. The build the pointer currently
+// selects is never removed, whatever the policy says: the pointer is what
+// /app and the preview read, so removing it turns both into a 404.
+func (s *Store) Collect(ctx context.Context, prefix string, policy RetentionPolicy) (Collection, error) {
+	out := Collection{Prefix: prefix, Kept: []string{}, Removed: []string{}}
+	if err := validPrefix(prefix); err != nil {
+		return out, err
+	}
+	builds, err := s.Builds(ctx, prefix)
+	if err != nil {
+		return out, err
+	}
+	active, _, err := s.Current(ctx, prefix)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return out, err
+	}
+	out.Active = active
+	now := s.now()
+	for i, build := range builds {
+		if build.ID == active {
+			out.Kept = append(out.Kept, build.ID)
+			continue
+		}
+		withinCount := i < policy.Keep
+		withinAge := policy.MaxAge <= 0 || now.Sub(build.StagedAt) <= policy.MaxAge
+		if withinCount && withinAge {
+			out.Kept = append(out.Kept, build.ID)
+			continue
+		}
+		if err := s.dropBuild(ctx, prefix, build.ID); err != nil {
+			return out, err
+		}
+		out.Removed = append(out.Removed, build.ID)
+	}
+	return out, nil
+}
+
+// CollectSession applies policy to every build prefix one session owns: its
+// draft builds, each contestant's archive, and the published snapshot. The
+// published prefix keeps only its active build — every publish copies the
+// current build there, so without this it grows by one full copy per publish.
+func (s *Store) CollectSession(ctx context.Context, id string, policy RetentionPolicy) ([]Collection, error) {
+	var out []Collection
+
+	draft, err := s.Collect(ctx, SessionPrefix(id), policy)
+	if err != nil {
+		return out, err
+	}
+	out = append(out, draft)
+
+	published, err := s.Collect(ctx, PublishedPrefix(id), RetentionPolicy{Keep: 1})
+	if err != nil {
+		return out, err
+	}
+	out = append(out, published)
+
+	prefixes, err := s.contestPrefixes(ctx, id)
+	if err != nil {
+		return out, err
+	}
+	for _, prefix := range prefixes {
+		collection, err := s.Collect(ctx, prefix, policy)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, collection)
+	}
+	return out, nil
+}
+
+// SessionIDs lists the sessions that have any build stored, so a sweep can
+// walk the whole store without consulting the session database.
+func (s *Store) SessionIDs(ctx context.Context) ([]string, error) {
+	objects, err := s.backend.List(ctx, "sessions")
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	ids := make([]string, 0)
+	for _, obj := range objects {
+		rest, found := strings.CutPrefix(obj.Key, "sessions/")
+		if !found {
+			continue
+		}
+		id, _, found := strings.Cut(rest, "/")
+		if !found || id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// contestPrefixes lists the contestant archives under a session's namespace.
+func (s *Store) contestPrefixes(ctx context.Context, id string) ([]string, error) {
+	root := path.Join(SessionPrefix(id), "contest")
+	objects, err := s.backend.List(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	prefixes := make([]string, 0)
+	for _, obj := range objects {
+		rest, found := strings.CutPrefix(obj.Key, root+"/")
+		if !found {
+			continue
+		}
+		provider, _, found := strings.Cut(rest, "/")
+		if !found || provider == "" || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		prefixes = append(prefixes, ContestPrefix(id, provider))
+	}
+	sort.Strings(prefixes)
+	return prefixes, nil
+}
+
+// dropBuild removes one build's objects and its manifest.
+func (s *Store) dropBuild(ctx context.Context, prefix, id string) error {
+	if err := s.backend.DeletePrefix(ctx, buildPrefix(prefix, id)); err != nil {
+		return err
+	}
+	return s.backend.DeletePrefix(ctx, manifestKey(prefix, id))
 }

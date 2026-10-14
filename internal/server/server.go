@@ -88,6 +88,10 @@ type Config struct {
 	// building sessions with no live lease. Zero uses the 30s default; tests
 	// shrink it.
 	SweepInterval time.Duration
+	// BuildGCInterval is how often old 构建 (Builds) are collected. Zero uses
+	// the 6h default; tests shrink it. Collection only runs when an artifact
+	// store is configured — the local dist mode keeps no build history.
+	BuildGCInterval time.Duration
 	// StepDelay spaces the 流水线 stages so the timeline reads as progress
 	// rather than a burst. Zero uses the 120ms production default; E2E raises
 	// it so a 取消回合 (Cancel Turn) has a window to land in.
@@ -119,6 +123,8 @@ type Server struct {
 	// leaseTTL bounds an execution lease; sweepInterval is the sweeper tick.
 	leaseTTL      time.Duration
 	sweepInterval time.Duration
+	// buildGCInterval is how often old 构建 (Builds) are collected.
+	buildGCInterval time.Duration
 	// leaseHolder identifies this replica as the lease owner (host+pid): two
 	// Workers in one process share it, but the in-process running map already
 	// drops their duplicate, and a different replica has a different holder.
@@ -163,6 +169,10 @@ func New(cfg Config) *Server {
 	if sweepInterval <= 0 {
 		sweepInterval = 30 * time.Second
 	}
+	buildGCInterval := cfg.BuildGCInterval
+	if buildGCInterval <= 0 {
+		buildGCInterval = 6 * time.Hour
+	}
 	stepDelay := cfg.StepDelay
 	if stepDelay <= 0 {
 		stepDelay = 120 * time.Millisecond
@@ -183,16 +193,18 @@ func New(cfg Config) *Server {
 			Artifacts: artifacts,
 			StepDelay: stepDelay,
 		},
-		artifacts:     artifacts,
-		builder:       build,
-		leaseTTL:      leaseTTL,
-		sweepInterval: sweepInterval,
-		leaseHolder:   fmt.Sprintf("%s-%d", host, os.Getpid()),
+		artifacts:       artifacts,
+		builder:         build,
+		leaseTTL:        leaseTTL,
+		sweepInterval:   sweepInterval,
+		buildGCInterval: buildGCInterval,
+		leaseHolder:     fmt.Sprintf("%s-%d", host, os.Getpid()),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.startWorkers(ctx, workers)
 	s.startSweeper(ctx)
+	s.startBuildGC(ctx)
 	return s
 }
 
@@ -321,6 +333,70 @@ func (s *Server) sweepOnce(ctx context.Context) {
 		}
 		slog.Info("recovery sweep: re-enqueued building session",
 			"session", ref.ID, "kind", kind)
+	}
+}
+
+// BuildRetention is the 构建 (Build) retention policy from ADR-0015: a build
+// survives only when it is BOTH among the newest 20 and no older than 30 days.
+// The active build is never removed, whatever the policy says — the pointer is
+// what /app and the preview read.
+var BuildRetention = artifact.RetentionPolicy{Keep: 20, MaxAge: 30 * 24 * time.Hour}
+
+// startBuildGC collects old builds once at startup, then on every
+// BuildGCInterval tick. Without an artifact store there is no build history to
+// collect — the local dist mode keeps a single directory — so it is a no-op.
+func (s *Server) startBuildGC(ctx context.Context) {
+	if s.artifacts == nil {
+		return
+	}
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		s.collectBuilds(ctx)
+		ticker := time.NewTicker(s.buildGCInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.collectBuilds(ctx)
+			}
+		}
+	}()
+}
+
+// collectBuilds walks every session that has builds and applies the retention
+// policy to each of its build prefixes. It logs what it removed and what it
+// kept, because a sweep that deletes data has to leave a trace.
+func (s *Server) collectBuilds(ctx context.Context) {
+	ids, err := s.artifacts.SessionIDs(ctx)
+	if err != nil {
+		slog.Warn("build GC: list sessions", "err", err)
+		return
+	}
+	removed := 0
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		collections, err := s.artifacts.CollectSession(ctx, id, BuildRetention)
+		if err != nil {
+			slog.Warn("build GC: collect session", "session", id, "err", err)
+			continue
+		}
+		for _, collection := range collections {
+			if len(collection.Removed) == 0 {
+				continue
+			}
+			removed += len(collection.Removed)
+			slog.Info("build GC: removed builds",
+				"session", id, "prefix", collection.Prefix, "active", collection.Active,
+				"removed", len(collection.Removed), "kept", len(collection.Kept))
+		}
+	}
+	if removed > 0 {
+		slog.Info("build GC: done", "sessions", len(ids), "removed", removed)
 	}
 }
 
