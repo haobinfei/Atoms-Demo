@@ -307,3 +307,82 @@ export async function getFile(id: string, path: string): Promise<{ path: string;
   if (!resp.ok) throw new Error(`get file: ${resp.status}`)
   return (await resp.json()) as { path: string; content: string }
 }
+
+// SaveError carries what the caller needs to say something useful: a 409 means
+// the session is mid-turn (a retry will work), anything else is a real failure.
+export class SaveError extends Error {
+  constructor(
+    message: string,
+    readonly conflict: boolean,
+  ) {
+    super(message)
+  }
+}
+
+// putFile saves a hand edit. It resolves even when the rebuild failed, because
+// the two outcomes are different: the write landed but the app did not compile.
+// A rejected promise means the write itself did not happen.
+export async function putFile(
+  id: string,
+  path: string,
+  content: string,
+): Promise<{ rebuilt: boolean; buildError?: string }> {
+  const resp = await fetch(`/api/sessions/${id}/file/${encodeURIComponent(path)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+  if (resp.status === 409) {
+    throw new SaveError('会话正在执行回合，等它结束再保存。', true)
+  }
+  if (!resp.ok) {
+    throw new SaveError(`保存失败（${resp.status}），内容还在编辑框里，可以重试。`, false)
+  }
+  return (await resp.json()) as { rebuilt: boolean; buildError?: string }
+}
+
+// 改动记录 (Change Record): one file write, keyed to the seq of the 文件 event
+// that announced it (ticket #54). author tells an Agent's rewrite apart from a
+// 用户手改; a binary or oversized record carries no diff, only the flags.
+export interface ChangeRecord {
+  seq: number
+  path: string
+  author: 'agent' | 'user'
+  kind: 'added' | 'modified' | 'deleted' | 'unchanged'
+  added: number
+  removed: number
+  binary?: boolean
+  tooLarge?: boolean
+  at: string
+}
+
+export interface ChangeDetail extends ChangeRecord {
+  diff: string
+}
+
+// listChanges returns the summaries — no diff bodies. The timeline lists a
+// 回合's files from this and fetches one diff at a time.
+export async function listChanges(id: string): Promise<ChangeRecord[]> {
+  const resp = await fetch(`/api/sessions/${id}/changes`)
+  if (!resp.ok) throw new Error(`list changes: ${resp.status}`)
+  return (await resp.json()) as ChangeRecord[]
+}
+
+// getChange returns one record with its unified diff.
+export async function getChange(id: string, seq: number): Promise<ChangeDetail> {
+  const resp = await fetch(`/api/sessions/${id}/changes/${seq}`)
+  if (!resp.ok) throw new Error(`get change: ${resp.status}`)
+  return (await resp.json()) as ChangeDetail
+}
+
+// putThumbnail uploads the dashboard cover screenshot (ticket #56). The body
+// is the PNG exactly as the browser captured it; the server checks the magic
+// bytes itself rather than trusting this header.
+export async function putThumbnail(id: string, blob: Blob): Promise<void> {
+  const resp = await fetch(`/api/sessions/${id}/thumbnail`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'image/png' },
+    body: blob,
+  })
+  if (!resp.ok) throw new Error(`put thumbnail: ${resp.status}`)
+}

@@ -4,6 +4,7 @@ package server
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/haobinfei/Atoms-Demo/internal/artifact"
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
+	"github.com/haobinfei/Atoms-Demo/internal/changes"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
 	"github.com/haobinfei/Atoms-Demo/internal/identity"
 	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
@@ -102,11 +104,15 @@ type Server struct {
 	store     session.Store
 	cfg       Config
 	artifacts *artifact.Store
-	bus       eventstream.Bus
-	queue     jobqueue.Queue
-	pipeline  *pipeline.Pipeline
-	builder   *builder.Builder
-	payStore  *pay.Store
+	// changes records what every write changed, so the workspace can list
+	// a 回合's files with per-file diffs (ticket #54). It lives on the same
+	// workspace disk as app/ and dist/, so both store deployments share it.
+	changes  *changes.Store
+	bus      eventstream.Bus
+	queue    jobqueue.Queue
+	pipeline *pipeline.Pipeline
+	builder  *builder.Builder
+	payStore *pay.Store
 
 	// cancel stops the Worker pool and the recovery sweeper; closeOnce makes
 	// Close idempotent.
@@ -179,6 +185,7 @@ func New(cfg Config) *Server {
 	}
 	host, _ := os.Hostname()
 	build := builder.New()
+	changeStore := changes.NewStore(cfg.WorkspaceDir)
 	s := &Server{
 		store:    store,
 		cfg:      cfg,
@@ -191,9 +198,11 @@ func New(cfg Config) *Server {
 			Prov:      prov,
 			Builder:   build,
 			Artifacts: artifacts,
+			Changes:   changeStore,
 			StepDelay: stepDelay,
 		},
 		artifacts:       artifacts,
+		changes:         changeStore,
 		builder:         build,
 		leaseTTL:        leaseTTL,
 		sweepInterval:   sweepInterval,
@@ -450,6 +459,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/sessions/{id}/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/sessions/{id}/file/{path...}", s.handleGetFile)
+	mux.HandleFunc("PUT /api/sessions/{id}/file/{path...}", s.handlePutFile)
+	mux.HandleFunc("GET /api/sessions/{id}/changes", s.handleListChanges)
+	mux.HandleFunc("GET /api/sessions/{id}/changes/{seq}", s.handleGetChange)
+	mux.HandleFunc("PUT /api/sessions/{id}/thumbnail", s.handlePutThumbnail)
+	mux.HandleFunc("GET /api/sessions/{id}/thumbnail", s.handleGetThumbnail)
 	mux.HandleFunc("GET /api/sessions/{id}/export", s.handleExport)
 	mux.HandleFunc("POST /api/pay/orders", s.handlePayCreate)
 	mux.HandleFunc("GET /api/pay/orders", s.handlePayList)
@@ -691,14 +705,46 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 	// Dist filenames are not content-hashed, and the preview iframe reloads
 	// the same URLs after every build. Without an explicit policy browsers
 	// fall back to heuristic caching and keep serving the pre-rebuild
-	// bundle, so the preview shows a stale app. no-cache forces a
-	// revalidation round-trip: unchanged files still get a cheap 304.
-	w.Header().Set("Cache-Control", "no-cache")
+	// bundle, so the preview shows a stale app.
+	//
+	// no-store, not no-cache: HTTP dates have one-second granularity, so a
+	// rebuild that lands in the same second as the previous one produces an
+	// identical Last-Modified, and no-cache turns the browser's conditional
+	// request into a 304 that keeps the old bundle (verified with curl:
+	// rewrite within the same second -> 304; mtime +10s -> 200). no-store
+	// makes the browser re-fetch every time, which is cheap for the single
+	// user watching one preview.
+	w.Header().Set("Cache-Control", "no-store")
 	if rel == "" {
 		s.servePreviewIndex(w, r, full)
 		return
 	}
-	http.ServeFile(w, r, full)
+	s.servePreviewAsset(w, r, full)
+}
+
+// servePreviewAsset streams a dist asset without mtime-based conditional
+// handling. http.ServeFile would answer If-Modified-Since with 304 whenever
+// the file's mtime is not newer than the validator — and because HTTP dates
+// have one-second granularity, a rebuild that lands in the same second as the
+// previous one produces an identical Last-Modified and is 304'd back into
+// staleness. That is exactly how the preview ended up serving a pre-rebuild
+// bundle after a successful save. A zero modtime makes ServeContent skip the
+// precondition entirely: every request gets the current bytes, Range still
+// works for the media assets, and the no-store header above keeps well-behaved
+// clients from caching at all.
+func (s *Server) servePreviewAsset(w http.ResponseWriter, r *http.Request, full string) {
+	f, err := os.Open(full)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not built yet")
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "not built yet")
+		return
+	}
+	http.ServeContent(w, r, filepath.Base(full), time.Time{}, f)
 }
 
 // handleArtifactApp serves the same public /app surface from the shared
@@ -735,7 +781,10 @@ func (s *Server) handleArtifactApp(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	defer obj.Body.Close()
-	w.Header().Set("Cache-Control", "no-cache")
+	// no-store for the same reason as the local dist path: a build activated
+	// one second after its predecessor must not be masked by a same-second
+	// 304. The ETag/Last-Modified below stay for observability.
+	w.Header().Set("Cache-Control", "no-store")
 	if rel == "index.html" {
 		body, err := io.ReadAll(obj.Body)
 		if err != nil {
@@ -831,6 +880,12 @@ func (s *Server) servePreviewIndexBody(w http.ResponseWriter, body []byte, ns st
 	} else {
 		out = append(append([]byte{}, injection...), body...)
 	}
+	// The index is the entry point of every reload; it must never be served
+	// from a cached copy, or the iframe re-runs the previous bundle. Both the
+	// local dist path and the artifact path funnel through here, so setting
+	// the policy once covers both. no-store (not no-cache) because HTTP date
+	// granularity lets a same-second rebuild be 304'd back into staleness.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(out)
 }
@@ -891,6 +946,302 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		"path":    filepath.ToSlash(r.PathValue("path")),
 		"content": string(data),
 	})
+}
+
+// maxEditableFileBytes bounds a hand edit. This is a source editor, not a file
+// transfer: every file a build produces is far below this.
+const maxEditableFileBytes = 512 << 10
+
+// handlePutFile saves a hand edit to one generated file and rebuilds, so the
+// preview and /app serve the edit (ticket #53).
+//
+// This is the only route that writes generated code from the outside, so it
+// re-states every rule instead of trusting the client:
+//   - the session must belong to the caller (appDir resolves through the
+//     workspace partition) and must not be mid-turn — a write racing a 回合
+//     would be overwritten by that 回合's own file writes, or silently win
+//     against them;
+//   - the path must resolve inside the app dir (safeJoin) and must already
+//     exist: creating paths from here would turn a code editor into a file
+//     manager, and every file a build can produce is already on disk;
+//   - the body is bounded.
+//
+// A failed rebuild is reported as a failed rebuild, not as a failed write: the
+// file is on disk either way, so the caller is told which of the two happened
+// rather than left to guess from a 500.
+func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+
+	sess, err := s.store.Load(user, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.Status == "building" {
+		writeError(w, http.StatusConflict, "session is building, wait for the current turn")
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxEditableFileBytes+1)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	if len(req.Content) > maxEditableFileBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "file is too large to edit here")
+		return
+	}
+
+	appDir, err := s.appDir(user, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rel := r.PathValue("path")
+	full, err := safeJoin(appDir, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	// The previous content is the "before" half of this edit's 改动记录
+	// (ticket #54); it is only readable until the write below lands.
+	old, err := os.ReadFile(full)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Keep the existing mode: generated output is not a place to widen
+	// permissions from.
+	if err := os.WriteFile(full, []byte(req.Content), info.Mode().Perm()); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Rebuild so the edit is what the preview and /app serve. A build id is
+	// immutable and activated only at the end, so a failed rebuild leaves the
+	// previous version live rather than half-swapped.
+	rebuilt, buildErr := s.rebuild(r.Context(), user, id, appDir)
+	buildMessage := ""
+	if buildErr != nil {
+		buildMessage = buildErr.Error()
+		slog.Warn("rebuild after hand edit", "session", id, "path", rel, "err", buildErr)
+	}
+	appended := s.pipeline.EmitFileEdited(user, id, filepath.ToSlash(rel), rebuilt, buildMessage)
+	// The 改动记录 is keyed to the event the timeline just received, so the
+	// diff joins to the exact row that announced this edit (ticket #54).
+	// Best effort: the event is the source of truth for "a file changed".
+	if err := s.changes.Append(user, id, changes.NewRecord(appended.Seq, filepath.ToSlash(rel), changes.AuthorUser, string(old), req.Content)); err != nil {
+		slog.Warn("append hand-edit change record", "session", id, "path", rel, "err", err)
+	}
+
+	out := map[string]any{"path": filepath.ToSlash(rel), "rebuilt": rebuilt}
+	if buildMessage != "" {
+		out["buildError"] = buildMessage
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// rebuild compiles the session's app dir into a fresh dist and activates it for
+// /app and the preview. rebuilt=false means nothing changed the live version:
+// either there is no builder configured (local dist mode) or the build failed,
+// in which case err explains why.
+func (s *Server) rebuild(ctx context.Context, user, id, appDir string) (rebuilt bool, err error) {
+	if s.builder == nil {
+		return false, nil
+	}
+	ws, err := s.workspaceDir(user, id)
+	if err != nil {
+		return false, err
+	}
+	distDir := filepath.Join(ws, "dist")
+	if err := s.builder.Build(appDir, distDir); err != nil {
+		// Deliberately NOT removing distDir, unlike the 回合 path. A turn that
+		// fails leaves the session "failed", so serving nothing is the honest
+		// state. A hand edit that fails to compile leaves the session ready and
+		// its last good build on disk — that is exactly the way back the ticket
+		// asks for. esbuild only writes its outputs once compilation succeeds,
+		// so the previous build is intact.
+		return false, err
+	}
+	if s.artifacts == nil {
+		return true, nil
+	}
+	// A multi-replica /app reads the shared store, so an upload failure means
+	// the edit is not live anywhere but this replica.
+	if _, err := s.artifacts.PutTree(ctx, artifact.SessionPrefix(id), distDir); err != nil {
+		return false, fmt.Errorf("store build: %w", err)
+	}
+	return true, nil
+}
+
+// handleListChanges returns a session's 改动记录 (Change Records) as
+// summaries — no diff bodies. The timeline lists a 回合's files from this and
+// fetches one diff at a time, when the user opens a file: a turn's diffs are
+// far too much to ship to every render (ticket #54).
+//
+// The session is loaded first so another workspace's id answers 404 rather
+// than an empty list, matching every other session-scoped route.
+func (s *Server) handleListChanges(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	recs, err := s.changes.List(user, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]changes.Summary, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, rec.Summary())
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGetChange returns one 改动记录 with its diff. A binary or oversized
+// record answers with its flags and no diff, so the page can say "已改动"
+// without ever holding a body it cannot render (ticket #54).
+func (s *Server) handleGetChange(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	seq, err := strconv.Atoi(r.PathValue("seq"))
+	if err != nil || seq <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid change seq")
+		return
+	}
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	rec, ok, err := s.changes.Detail(user, id, seq)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "change not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+// maxThumbnailBytes bounds a cover screenshot (ticket #56). The browser
+// captures the preview frame at the pane's own size, so a real screenshot is
+// a few hundred kilobytes; anything larger is not one.
+const maxThumbnailBytes = 1 << 20
+
+// pngMagic is the signature every PNG starts with. These bytes are written
+// straight to disk, so the type is checked on the body, never trusted from
+// the Content-Type header.
+var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+
+// thumbnailPath resolves a session's cover screenshot inside its workspace,
+// next to the app, dist and 改动记录 files. Derived state: nothing about it
+// is persisted in the session record (the 交付边界 forbids that).
+func (s *Server) thumbnailPath(user, id string) (string, error) {
+	ws, err := s.workspaceDir(user, id)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(ws, "thumbnail.png"), nil
+}
+
+// handlePutThumbnail stores the dashboard cover screenshot for a session.
+// The capture happens in the browser: the preview frame is same-origin, so
+// foreignObject + canvas can read it, and no headless browser is involved
+// (docs/design §8.1 依赖政策).
+//
+// The Load is the membership check — a session that does not live under the
+// caller's current workspace answers 404, exactly like the file editor.
+func (s *Server) handlePutThumbnail(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxThumbnailBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cannot read the image")
+		return
+	}
+	if len(raw) == 0 {
+		writeError(w, http.StatusBadRequest, "empty image")
+		return
+	}
+	if len(raw) > maxThumbnailBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "image is too large")
+		return
+	}
+	if !bytes.HasPrefix(raw, pngMagic) {
+		writeError(w, http.StatusBadRequest, "only PNG screenshots are accepted")
+		return
+	}
+	dst, err := s.thumbnailPath(user, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Write-then-rename: a concurrent reader must never see a half-written
+	// cover.
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleGetThumbnail serves the cover screenshot. It is member-scoped like
+// the dashboard list it feeds: the route lives under /api, so anonymous
+// callers are already rejected by the identity middleware, and a session
+// outside the caller's workspace is a 404 rather than someone else's cover.
+//
+// no-store because the cover changes with every build while the URL stays
+// the same; a re-fetch is one small file.
+func (s *Server) handleGetThumbnail(w http.ResponseWriter, r *http.Request) {
+	user := s.requestWorkspaceID(r)
+	id := r.PathValue("id")
+	if _, err := s.store.Load(user, id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	path, err := s.thumbnailPath(user, id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no cover yet")
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "no cover yet")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, f)
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {

@@ -825,6 +825,120 @@ body {
   color: var(--c-text);
 }
 
+/* ---------- 每回合文件清单与差异（#54） ---------- */
+.tl-files-note {
+  margin-left: 6px;
+  color: var(--c-text-muted);
+}
+
+.tl-file-row {
+  padding: 2px 0;
+}
+
+.tl-file-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tl-file-toggle:hover {
+  background: var(--c-surface-2);
+}
+
+/* 谁改的：Agent 改动与用户手改必须一眼可分（#54）。 */
+.tl-author {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.tl-author--agent {
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+
+.tl-author--user {
+  background: var(--c-success-soft);
+  color: var(--c-success);
+}
+
+.tl-file-stat {
+  flex: none;
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* 差异说明与降级提示：二进制、超大、未变、加载中都说同一句话的格式。 */
+.fd-note {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  color: var(--c-text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.fd-diff-wrap {
+  margin: 4px 0 10px;
+}
+
+.fd-diff {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  line-height: 1.65;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* 一行一个 span：pre 的换行由块级元素承担，不需要文本里的 \n。 */
+.fd-diff span {
+  display: block;
+}
+
+.fd-diff-add {
+  background: var(--c-success-soft);
+  color: var(--c-success);
+}
+
+.fd-diff-del {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.fd-diff-hunk {
+  color: var(--c-text-muted);
+}
+
+.fd-diff-file {
+  color: var(--c-text-dim);
+  font-weight: 600;
+}
+
+.fd-diff-meta {
+  color: var(--c-text-muted);
+}
+
 .tl-agent {
   display: flex;
   align-items: center;
@@ -1098,7 +1212,11 @@ body {
   background: var(--c-overlay);
   display: flex;
   justify-content: flex-end;
-  z-index: 20;
+  /* Above the sticky app-header (z 50): the drawer is modal, and on mobile
+     the header wraps to two rows (~94px tall) — under it, the drawer's own
+     toolbar lands in the header's band and every button click is
+     intercepted by the nav. */
+  z-index: 60;
 }
 
 .files-drawer {
@@ -1130,7 +1248,12 @@ body {
 .fd-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 240px 1fr;
+  /* minmax(0, 1fr), not 1fr: a grid track defaults to min-width:auto, so the
+     min-content width of a long pre-formatted source line blows the view
+     column out past the drawer (measured 899px inside a 389px drawer at
+     390px viewport) and pushes the toolbar buttons off-screen. minmax lets
+     the track shrink and the children scroll instead. */
+  grid-template-columns: 240px minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -1168,12 +1291,14 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
 
 .fd-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
 }
@@ -1181,6 +1306,12 @@ body {
 .fd-toolbar code {
   font-size: var(--fs-sm);
   color: var(--text-dim);
+  /* A deep path must ellipsize, never push the action button out of a
+     narrow drawer. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fd-toolbar button {
@@ -1191,6 +1322,8 @@ body {
   padding: 4px 12px;
   font-size: var(--fs-xs);
   cursor: pointer;
+  /* The toolbar shrinks on mobile; the action must stay tappable. */
+  flex: 0 0 auto;
 }
 
 .fd-view pre {
@@ -1852,62 +1985,19 @@ select {
   opacity: 0.82;
 }
 
-.dash-cover-frame {
+/* 截图封面（#56）：一张图填满封面，网格底纹只服务于无图时的字母占位。*/
+.dash-cover-img {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
-  background: var(--c-surface-1);
-}
-
-.dash-cover-frame iframe {
+  z-index: 1;
   width: 100%;
   height: 100%;
-  border: 0;
-  pointer-events: none;
-  transform: scale(1.01);
-  /* Hold the frame invisible until it has painted, so the loading note is
-     replaced by the app rather than by a blank white box. */
-  opacity: 0;
-  transition: opacity var(--dur) var(--ease);
+  object-fit: cover;
+  display: block;
 }
 
-.dash-cover-frame.is-loaded iframe {
-  opacity: 1;
-}
-
-.dash-cover-loading {
-  position: absolute;
-  font-size: var(--fs-xs);
-  color: var(--c-text-muted);
-}
-
-.dash-cover-live {
-  position: absolute !important;
-  right: 10px;
-  bottom: 10px;
-  z-index: 4 !important;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: var(--r-full);
-  background: rgba(15, 17, 21, 0.72);
-  color: #fff;
-  font-size: 10px !important;
-  font-weight: 600 !important;
-  text-shadow: none !important;
-  backdrop-filter: blur(6px);
-}
-
-.dash-cover-live::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--c-success);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+.dash-cover--shot::after {
+  display: none;
 }
 
 .cover-todo { background: var(--cover-todo); }
@@ -2340,7 +2430,7 @@ select {
   .ws-body { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 1fr) minmax(280px, 1fr); }
   .ws-timeline { border-right: 0; border-bottom: 1px solid var(--border); }
   .files-drawer { width: 100vw; }
-  .fd-body { grid-template-columns: 120px 1fr; }
+  .fd-body { grid-template-columns: 120px minmax(0, 1fr); }
 }
 
 /* ---------- 工作台分栏：固定比例 + 可折叠 ---------- */
@@ -2540,7 +2630,7 @@ select {
 /* ---------- 代码抽屉：搜索、行号与着色 ---------- */
 /* The search box lives above the list, so the column owns the divider and the
    scrolling rather than the list itself. */
-.fd-side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--c-border); }
+.fd-side { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid var(--c-border); }
 .fd-list { border-right: 0; flex: 1; }
 
 .fd-search {
@@ -2650,3 +2740,38 @@ select {
 }
 .menu-section-title { padding: 4px 10px; color: var(--c-text-muted); font-size: var(--fs-xs); }
 .menu-panel button.is-checked { color: var(--c-accent); }
+
+/* 手改代码（#53）：编辑器与查看器共用同一个位置，所以尺寸对齐 fd-code。*/
+.fd-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-panel);
+  color: var(--c-text);
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+.fd-editor:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+.fd-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--c-dim);
+}
+.fd-saved {
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--c-accent) 12%, transparent);
+  color: var(--c-text);
+  font-size: 12.5px;
+}

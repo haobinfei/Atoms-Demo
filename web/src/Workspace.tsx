@@ -4,9 +4,11 @@ import {
   chatSession,
   getSession,
   isAuthError,
+  listChanges,
   openEventStream,
   redirectToLogin,
   retrySession,
+  type ChangeRecord,
   type Session,
   type SessionEvent,
 } from './api'
@@ -15,6 +17,7 @@ import Preview from './Preview'
 import PublishPanel from './PublishPanel'
 import Timeline from './Timeline'
 import ContestPanel from './ContestPanel'
+import { captureAndUpload } from './thumbnail'
 import { lastFailure } from './turns'
 
 const QUICK_CHIPS = ['把主题改成蓝色', '把主题改成绿色', '把主题改成橙色']
@@ -55,6 +58,9 @@ export default function Workspace({
   const [session, setSession] = useState<Session | null>(null)
   const [events, setEvents] = useState<SessionEvent[]>([])
   const [builtAt, setBuiltAt] = useState('')
+  // 改动记录 (Change Records) keyed to their 文件 event seq, so the timeline
+  // can attach a diff to each row it renders (ticket #54).
+  const [changes, setChanges] = useState<ChangeRecord[]>([])
   const [filesOpen, setFilesOpen] = useState(false)
   const [publishOpen, setPublishOpen] = useState(false)
   const [layout, setLayout] = useState<Layout>('split')
@@ -92,6 +98,26 @@ export default function Workspace({
     if (seq <= builtSeqRef.current) return
     builtSeqRef.current = seq
     setBuiltAt(new Date().toISOString())
+  }
+
+  // A saved hand edit is a new build, so the preview has to remount on it the
+  // way a finished 回合 makes it remount. There is no turn seq to compare
+  // against here, so this bumps the frame key directly (ticket #53).
+  const onFileSaved = () => {
+    setBuiltAt(new Date().toISOString())
+    void getSession(sessionId).then(setSession).catch(() => {})
+  }
+
+  // The dashboard cover is a screenshot of the preview, taken here because
+  // this is the only place the frame is mounted and still (ticket #56). The
+  // frame remounts on every build, so each finished build re-captures.
+  //
+  // Two guards: a frame that loads while the session is 构建中 is the previous
+  // build (the new one gets its own load event when it is ready), and a
+  // contest review frame shows a candidate version, not this session's app.
+  const onFrameLoaded = (frame: HTMLIFrameElement) => {
+    if (busy || reviewVersion) return
+    void captureAndUpload(sessionId, frame).catch(() => {})
   }
 
   // Load persisted history, then follow the live event stream.
@@ -194,6 +220,30 @@ export default function Workspace({
       if (watchdog) clearInterval(watchdog)
     }
   }, [sessionId])
+
+  // The 改动记录 are refetched whenever a 文件 or 完成 event lands: a 回合
+  // writes its records after announcing its files, and a 手改's record
+  // arrives with its own event (ticket #54). A failed fetch keeps the old
+  // list — the rows still render, they just have no diff to open yet.
+  const changeTrigger = (() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i]
+      if (ev.type === 'file' || ev.type === 'done') return ev.seq
+    }
+    return 0
+  })()
+  useEffect(() => {
+    let alive = true
+    listChanges(sessionId).then(
+      (list) => {
+        if (alive) setChanges(list)
+      },
+      () => {},
+    )
+    return () => {
+      alive = false
+    }
+  }, [sessionId, changeTrigger])
 
   // Tick every second while building so the elapsed time updates.
   useEffect(() => {
@@ -430,7 +480,12 @@ export default function Workspace({
           <div className={`ws-body ws-body--${layout}`}>
             <aside className="ws-timeline">
               <div className="ws-timeline-scroll">
-                <Timeline events={events} prompt={session?.prompt ?? ''} />
+                <Timeline
+                  sessionId={sessionId}
+                  events={events}
+                  prompt={session?.prompt ?? ''}
+                  changes={changes}
+                />
               </div>
               <div className="ws-chat">
                 {session?.status === 'building' && (
@@ -549,6 +604,7 @@ export default function Workspace({
                     ready={session?.previewReady ?? false}
                     published={published}
                     src={reviewVersion ? `/app/${sessionId}/contest/${reviewVersion}/` : undefined}
+                    onFrameLoaded={onFrameLoaded}
                   />
                 </>
               )}
@@ -556,7 +612,12 @@ export default function Workspace({
           </div>
         </>
       )}
-      <FilesDrawer sessionId={sessionId} open={filesOpen} onClose={() => setFilesOpen(false)} />
+      <FilesDrawer
+        sessionId={sessionId}
+        open={filesOpen}
+        onClose={() => setFilesOpen(false)}
+        onSaved={onFileSaved}
+      />
       {publishOpen && (
         <PublishPanel sessionId={sessionId} onClose={() => setPublishOpen(false)} />
       )}

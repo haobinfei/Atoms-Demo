@@ -6,6 +6,7 @@ export default function Preview({
   src,
   ready = true,
   published = false,
+  onFrameLoaded,
 }: {
   sessionId: string
   // Changes after every successful build; used as the iframe key so the
@@ -21,6 +22,10 @@ export default function Preview({
   // always shows the draft build, which is the same bytes as the published one
   // right after a publish — and diverges as soon as another 回合 runs.
   published?: boolean
+  // Called with the frame element once a build has loaded. The workspace uses
+  // it to capture the dashboard cover (ticket #56); the frame is same-origin,
+  // so reading it is allowed.
+  onFrameLoaded?: (frame: HTMLIFrameElement) => void
 }) {
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [reloadKey, setReloadKey] = useState(0)
@@ -80,7 +85,10 @@ export default function Preview({
               src={frameSrc}
               className={device === 'mobile' ? 'frame mobile' : 'frame'}
               title="应用预览"
-              onLoad={() => setLoadedKey(frameKey)}
+              onLoad={(e) => {
+                setLoadedKey(frameKey)
+                onFrameLoaded?.(e.currentTarget)
+              }}
             />
           </>
         ) : (

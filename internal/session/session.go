@@ -711,11 +711,14 @@ func (s *FileStore) Duplicate(owner, id string) (*Session, error) {
 	if err := s.saveLocked(dst); err != nil {
 		return nil, err
 	}
-	// Best-effort copy of the generated app and dist so the copy previews
-	// immediately; a missed file only means the next turn rebuilds it.
-	// Copying while holding the store lock blocks every writer for the
-	// duration; accepted at demo scale (see List).
-	for _, sub := range []string{"app", "dist"} {
+	// Best-effort copy of the generated app, its dist, the 改动记录 and the
+	// cover screenshot, so the copy previews immediately, its timeline keeps
+	// every file's diff (ticket #54) and its dashboard card keeps its picture
+	// (ticket #56). A missed file only means the next turn rebuilds it, or
+	// the next visit re-captures the cover. Copying while holding the store
+	// lock blocks every writer for the duration; accepted at demo scale
+	// (see List).
+	for _, sub := range []string{"app", "dist", "changes.jsonl", "thumbnail.png"} {
 		_ = CopyDirTree(filepath.Join(s.Workspace(owner, id), sub), filepath.Join(s.Workspace(owner, newID), sub))
 	}
 	return dst, nil
