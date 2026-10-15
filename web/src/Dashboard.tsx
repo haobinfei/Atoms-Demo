@@ -160,6 +160,37 @@ export default function Dashboard({
 
   return (
     <div className="dash">
+      <div className="dash-head">
+        <div className="dash-head-text">
+          <h1 className="dash-title">项目总览</h1>
+          <p className="dash-subtitle">管理当前工作区的应用，点开任意一个继续构建。</p>
+        </div>
+        <button className="btn btn--primary" onClick={onNewProject}>
+          新建项目
+        </button>
+      </div>
+      {/* 概览统计只数现有列表，不另开后端接口（ADR-0017）。搜索时结果是被筛过
+          的，数出来会误导，所以只在看全量时展示。 */}
+      {!query && sessions.length > 0 && (
+        <div className="dash-stats">
+          <div className="dash-stat">
+            <span className="dash-stat-label">项目总数</span>
+            <span className="dash-stat-value">{sessions.length}</span>
+          </div>
+          <div className="dash-stat">
+            <span className="dash-stat-label">构建中</span>
+            <span className="dash-stat-value">{sessions.filter((s) => s.status === 'building').length}</span>
+          </div>
+          <div className="dash-stat">
+            <span className="dash-stat-label">已完成</span>
+            <span className="dash-stat-value">{sessions.filter((s) => s.status === 'ready').length}</span>
+          </div>
+          <div className="dash-stat">
+            <span className="dash-stat-label">构建失败</span>
+            <span className="dash-stat-value">{sessions.filter((s) => s.status === 'failed').length}</span>
+          </div>
+        </div>
+      )}
       <input
         className="dash-search"
         value={query}

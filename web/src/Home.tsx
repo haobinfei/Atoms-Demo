@@ -40,7 +40,9 @@ export default function Home({
   }
 
   return (
-    <div className="home">
+    // 新建项目 is the 创作入口 and keeps its centred composer; 我的项目 is the
+    // console's list page, so it takes the wider, denser layout (ADR-0017).
+    <div className={view === 'projects' ? 'home home--console' : 'home'}>
       <div className="home-brand">Atoms Demo</div>
       <nav className="tabs home-tabs">
         <button className={view === 'new' ? 'tab is-active' : 'tab'} onClick={() => onViewChange('new')}>

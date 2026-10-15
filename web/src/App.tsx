@@ -8,6 +8,17 @@ import { apply, readChoice, save, watchSystem, type ThemeChoice } from './theme'
 
 type Page = 'projects' | 'workspaces' | 'team' | 'account' | 'admin'
 
+// The 控制台外壳 (ADR-0017) names the page in its top bar, so the user can tell
+// which console page they are on. The nav labels themselves stay short: the
+// e2e cases locate them by their exact text.
+const PAGE_TITLE: Record<Page, string> = {
+  projects: '项目总览',
+  workspaces: '工作区',
+  team: '成员',
+  account: '账户设置',
+  admin: '平台管理',
+}
+
 // Offered in the account menu rather than the header: the theme is a personal
 // preference, and the header already carries the workspace controls.
 const THEME_OPTIONS = [
@@ -97,83 +108,120 @@ export default function App() {
     <Auth onLogin={refresh} />
   </>
 
-  return <div className="app-shell">
-    <header className="app-header">
-      <button className="app-logo" onClick={() => { setSessionId(null); setPage('projects'); history.replaceState(null, '', '/') }}>Atoms</button>
-      <select className="workspace-select" aria-label="当前工作区" value={account.currentWorkspace} disabled={switching} onChange={(event) => void changeWorkspace(event.target.value)}>
-        {account.workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
-      </select>
-      <nav className="app-nav" aria-label="主导航">
-        <button className={page === 'projects' ? 'active' : ''} onClick={() => setPage('projects')}>项目</button>
-        <button className={page === 'workspaces' ? 'active' : ''} onClick={() => setPage('workspaces')}>工作区</button>
-        {activeWorkspace?.kind === 'team' && <button className={page === 'team' ? 'active' : ''} onClick={() => setPage('team')}>成员</button>}
-        <button className={page === 'account' ? 'active' : ''} onClick={() => setPage('account')}>账户</button>
-        {account.admin && <button className={page === 'admin' ? 'active' : ''} onClick={() => setPage('admin')}>平台管理</button>}
-      </nav>
-      <div className="menu">
-        <button
-          className="menu-trigger"
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((open) => !open)}
+  // 控制台外壳 (Console Shell): the sidebar and top bar wrap the list and
+  // management pages. A 项目 workspace folds the sidebar away so its 对话 +
+  // 预览 split keeps the whole window, but the top bar stays — the account menu
+  // (and the theme choice inside it) has to remain reachable while working.
+  const inProject = sessionId !== null
+  const goToProjects = () => { setSessionId(null); setPage('projects'); history.replaceState(null, '', '/') }
+
+  return <div className={inProject ? 'app-shell app-shell--project' : 'app-shell'}>
+    {!inProject && <aside className="app-sidebar">
+      <button className="app-logo" onClick={goToProjects}>
+        <span className="app-logo-mark" aria-hidden="true">A</span>
+        <span className="app-logo-text">Atoms</span>
+      </button>
+      <div className="sidebar-block">
+        <span className="sidebar-label" id="sidebar-workspace-label">当前工作区</span>
+        <select
+          className="workspace-select"
+          aria-label="当前工作区"
+          aria-describedby="sidebar-workspace-label"
+          value={account.currentWorkspace}
+          disabled={switching}
+          onChange={(event) => void changeWorkspace(event.target.value)}
         >
-          <span className="avatar">{account.email.slice(0, 1)}</span>
-          <span className="app-email" title={account.email}>{account.email}</span>
-        </button>
-        {menuOpen && (
-          <>
-            <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
-            <div className="menu-panel" role="menu">
-              <div className="menu-header">{account.email}</div>
-              <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('account') }}>账户设置</button>
-              <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('workspaces') }}>工作区</button>
-              <div className="menu-section">
-                <span className="menu-section-title">主题</span>
-                {THEME_OPTIONS.map(([value, label]) => (
-                  <button
-                    key={value}
-                    role="menuitemradio"
-                    aria-checked={theme === value}
-                    className={theme === value ? 'is-checked' : ''}
-                    onClick={() => chooseTheme(value)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <button role="menuitem" className="is-danger" onClick={() => { setMenuOpen(false); void signOut() }}>退出登录</button>
-            </div>
-          </>
-        )}
+          {account.workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+        </select>
       </div>
-    </header>
-    {notice && <div className={noticeError ? 'app-notice app-notice--error' : 'app-notice'} role="alert">{notice}<button onClick={() => { setNotice(''); setNoticeError(false) }} aria-label="关闭提示">×</button></div>}
-    {inviteToken && <div className="invite-banner">
-      <span>你收到了工作区邀请。</span>
-      <button className="primary-action" onClick={async () => {
-        try {
-          await acceptInvitation(inviteToken)
-          await refresh()
-          setInviteToken(null)
-          history.replaceState(null, '', '/')
-          setNoticeError(false)
-          setNotice('已加入工作区。可从顶部切换。')
-        } catch (cause) { setNoticeError(true); setNotice(cause instanceof Error ? cause.message : '邀请无效或已过期。') }
-      }}>接受邀请</button>
-      <button onClick={() => { setInviteToken(null); history.replaceState(null, '', '/') }}>忽略</button>
-    </div>}
-    {page === 'workspaces' ? <Workspaces account={account} refresh={refresh} onWorkspaceDeleted={(id) => {
-      if (id !== account.currentWorkspace) return
-      setSessionId(null); setPage('projects'); setHomeView('projects')
-      history.replaceState(null, '', '/')
-    }} />
-      : page === 'team' && activeWorkspace?.kind === 'team' ? <TeamSettings key={activeWorkspace.id} workspace={activeWorkspace} account={account} onLeft={async () => {
-        await refresh(); setPage('projects'); setSessionId(null); setHomeView('projects')
+      <nav className="app-nav" aria-label="主导航">
+        <button className={page === 'projects' ? 'active' : ''} aria-current={page === 'projects' ? 'page' : undefined} onClick={() => setPage('projects')}>项目</button>
+        <button className={page === 'workspaces' ? 'active' : ''} aria-current={page === 'workspaces' ? 'page' : undefined} onClick={() => setPage('workspaces')}>工作区</button>
+        {activeWorkspace?.kind === 'team' && <button className={page === 'team' ? 'active' : ''} aria-current={page === 'team' ? 'page' : undefined} onClick={() => setPage('team')}>成员</button>}
+        <button className={page === 'account' ? 'active' : ''} aria-current={page === 'account' ? 'page' : undefined} onClick={() => setPage('account')}>账户</button>
+        {account.admin && <button className={page === 'admin' ? 'active' : ''} aria-current={page === 'admin' ? 'page' : undefined} onClick={() => setPage('admin')}>平台管理</button>}
+      </nav>
+      <div className="sidebar-foot">
+        <span className="sidebar-dot" aria-hidden="true" />
+        服务运行正常
+      </div>
+    </aside>}
+    <div className="app-main">
+      <header className="app-header">
+        {inProject
+          ? <button className="app-logo" onClick={goToProjects}>
+            <span className="app-logo-mark" aria-hidden="true">A</span>
+            <span className="app-logo-text">Atoms</span>
+          </button>
+          : <div className="header-context">
+            <span className="header-kicker">控制台</span>
+            <strong className="header-title">{PAGE_TITLE[page]}</strong>
+          </div>}
+        <div className="menu">
+          <button
+            className="menu-trigger"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            <span className="avatar">{account.email.slice(0, 1)}</span>
+            <span className="app-email" title={account.email}>{account.email}</span>
+          </button>
+          {menuOpen && (
+            <>
+              <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
+              <div className="menu-panel" role="menu">
+                <div className="menu-header">{account.email}</div>
+                <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('account') }}>账户设置</button>
+                <button role="menuitem" onClick={() => { setMenuOpen(false); setPage('workspaces') }}>工作区</button>
+                <div className="menu-section">
+                  <span className="menu-section-title">主题</span>
+                  {THEME_OPTIONS.map(([value, label]) => (
+                    <button
+                      key={value}
+                      role="menuitemradio"
+                      aria-checked={theme === value}
+                      className={theme === value ? 'is-checked' : ''}
+                      onClick={() => chooseTheme(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <button role="menuitem" className="is-danger" onClick={() => { setMenuOpen(false); void signOut() }}>退出登录</button>
+              </div>
+            </>
+          )}
+        </div>
+      </header>
+      {notice && <div className={noticeError ? 'app-notice app-notice--error' : 'app-notice'} role="alert">{notice}<button onClick={() => { setNotice(''); setNoticeError(false) }} aria-label="关闭提示">×</button></div>}
+      {inviteToken && <div className="invite-banner">
+        <span>你收到了工作区邀请。</span>
+        <button className="primary-action" onClick={async () => {
+          try {
+            await acceptInvitation(inviteToken)
+            await refresh()
+            setInviteToken(null)
+            history.replaceState(null, '', '/')
+            setNoticeError(false)
+            setNotice('已加入工作区。可从侧栏切换。')
+          } catch (cause) { setNoticeError(true); setNotice(cause instanceof Error ? cause.message : '邀请无效或已过期。') }
+        }}>接受邀请</button>
+        <button onClick={() => { setInviteToken(null); history.replaceState(null, '', '/') }}>忽略</button>
+      </div>}
+      {page === 'workspaces' ? <Workspaces account={account} refresh={refresh} onWorkspaceDeleted={(id) => {
+        if (id !== account.currentWorkspace) return
+        setSessionId(null); setPage('projects'); setHomeView('projects')
         history.replaceState(null, '', '/')
       }} />
-      : page === 'account' ? <AccountSettings account={account} onDeleted={() => { setAccount(null); history.replaceState(null, '', '/') }} />
-      : page === 'admin' && account.admin ? <AdminSettings currentAccountId={account.id} />
-      : sessionId ? <Workspace sessionId={sessionId} user={account.email} canPublish={activeWorkspace?.role === 'owner'} onExit={() => { setSessionId(null); history.pushState(null, '', '/') }} />
-      : <Home user={account.email} view={homeView} canDelete={activeWorkspace?.role === 'owner'} onViewChange={setHomeView} onCreated={(id) => { setSessionId(id); history.pushState(null, '', `?s=${id}`) }} />}
+        : page === 'team' && activeWorkspace?.kind === 'team' ? <TeamSettings key={activeWorkspace.id} workspace={activeWorkspace} account={account} onLeft={async () => {
+          await refresh(); setPage('projects'); setSessionId(null); setHomeView('projects')
+          history.replaceState(null, '', '/')
+        }} />
+        : page === 'account' ? <AccountSettings account={account} onDeleted={() => { setAccount(null); history.replaceState(null, '', '/') }} />
+        : page === 'admin' && account.admin ? <AdminSettings currentAccountId={account.id} />
+        : sessionId ? <Workspace sessionId={sessionId} user={account.email} canPublish={activeWorkspace?.role === 'owner'} onExit={() => { setSessionId(null); history.pushState(null, '', '/') }} />
+        : <Home user={account.email} view={homeView} canDelete={activeWorkspace?.role === 'owner'} onViewChange={setHomeView} onCreated={(id) => { setSessionId(id); history.pushState(null, '', `?s=${id}`) }} />}
+    </div>
   </div>
 }
