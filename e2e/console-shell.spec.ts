@@ -28,6 +28,13 @@ test('the console shell wraps the list and management pages', async ({ page, req
 
   // 工作区切换器在侧栏里，而不是顶栏。
   await expect(page.locator('.app-sidebar').getByLabel('当前工作区')).toBeVisible()
+
+  // 账户菜单要能被遮罩关掉。窄屏下外壳多了一条导航带，菜单面板跟着下移，
+  // 曾经压住遮罩的中心点，把这次点击截走——所以这条断言必须留在窄屏上跑。
+  await page.locator('.menu-trigger').click()
+  await expect(page.getByRole('menuitem', { name: '账户设置' })).toBeVisible()
+  await page.locator('.menu-backdrop').click()
+  await expect(page.getByRole('menuitem', { name: '账户设置' })).toHaveCount(0)
 })
 
 // 项目总览 is the console's list page: the cards are kept, and the 概览统计 are
