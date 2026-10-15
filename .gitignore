@@ -10,3 +10,8 @@ web/tsconfig.tsbuildinfo
 # 切回不含那些文件的分支时 git 会把它们从工作区删掉——这正是本仓库
 # 曾经丢失 .workbuddy/ 的原因。
 .workbuddy/
+
+# 本地复现/校验 harness（临时设施，不入库）：按生产装配起的本地服务器
+# 与重启一致性校验，仅供本机复跑使用，不随仓库分发。
+cmd/devrepro/
+cmd/restartcheck/
