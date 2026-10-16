@@ -19,12 +19,27 @@ import (
 	"github.com/haobinfei/Atoms-Demo/internal/identity"
 	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
 	"github.com/haobinfei/Atoms-Demo/internal/mailer"
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/server"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
 
 func main() {
+	// 可观测性：metrics 恒开并以 Prometheus 格式暴露在 /metrics；traces 由
+	// OTEL_EXPORTER_OTLP_ENDPOINT 开关，未配置时为 noop（ADR-0018）。
+	shutdownTelemetry, err := observability.Setup(context.Background())
+	if err != nil {
+		log.Fatalf("observability setup: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(ctx); err != nil {
+			log.Printf("observability shutdown: %v", err)
+		}
+	}()
+
 	dsn := os.Getenv("DATABASE_DSN")
 	if dsn == "" {
 		log.Fatal("DATABASE_DSN is required for identity and session storage")
@@ -36,6 +51,10 @@ func main() {
 	defer pool.Close()
 	if err := pool.Ping(context.Background()); err != nil {
 		log.Fatalf("identity postgres ping: %v", err)
+	}
+	// 连接池打满是「查询慢」和「服务挂了」之间最常见的那一步，必须能看见。
+	if err := observability.RegisterDBPool("identity", pool.Stat); err != nil {
+		log.Printf("register identity pool metrics: %v", err)
 	}
 	ident := identity.New(pool)
 	trustedProxies, err := parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
@@ -75,16 +94,29 @@ func main() {
 		log.Fatalf("postgres session store: %v", err)
 	}
 	defer store.Close()
+	if err := observability.RegisterDBPool("session", store.PoolStats); err != nil {
+		log.Printf("register session pool metrics: %v", err)
+	}
 	cfg.Store = store
 	redisDB, err := strconv.Atoi(getenv("REDIS_DB", "0"))
 	if err != nil || redisDB < 0 {
 		log.Fatal("REDIS_DB must be a non-negative integer")
 	}
+	// 队列与事件扇出共用同一个 Redis 客户端：RedisQueue.Close 是 no-op 正是
+	// 为了让调用方持有连接。少一份连接，也少一份要监控的连接池。
+	redisClient := newRedisClient(redisDB)
+	if redisClient != nil {
+		if supported, err := observability.RegisterRedisPool("redis", redisClient); err != nil {
+			log.Printf("register redis pool metrics: %v", err)
+		} else if !supported {
+			log.Printf("redis client does not expose pool stats; skipping redis metrics")
+		}
+	}
 	artifacts, artifactMode := newArtifacts()
 	cfg.Artifacts = artifacts
-	bus, busMode := newEventBus(redisDB)
+	bus, busMode := newEventBus(redisClient)
 	cfg.Bus = bus
-	queue, queueMode := newJobQueue(cfg.QueueWorkers, redisDB)
+	queue, queueMode := newJobQueue(redisClient, cfg.QueueWorkers)
 	cfg.Queue = queue
 	addr := ":" + getenv("PORT", "4173")
 	log.Printf("atoms-demo server listening on %s (workspace=%s, auth=identity, store=postgres, artifacts=%s, bus=%s, queue=%s, workers=%d)",
@@ -134,22 +166,30 @@ func newArtifacts() (*artifact.Store, string) {
 	return store, "cos:" + bucket
 }
 
-// newEventBus wires the SSE fan-out from the atoms-middleware Redis Secret
-// contract (REDIS_HOST/PORT/USERNAME/PASSWORD). Redis is a hot path, not the
-// source of truth (ADR-0007): an empty host keeps the in-process MemoryBus,
-// and an unreachable Redis degrades to it without refusing to start —
-// clients still catch up through Postgres replay.
-func newEventBus(db int) (eventstream.Bus, string) {
+// newRedisClient builds the shared Redis client. An empty REDIS_HOST keeps the
+// Redis-less local mode (in-process bus and queue) and returns nil.
+func newRedisClient(db int) *redis.Client {
 	host := os.Getenv("REDIS_HOST")
 	if host == "" {
-		return nil, "memory"
+		return nil
 	}
-	client := redis.NewClient(&redis.Options{
+	return redis.NewClient(&redis.Options{
 		Addr:     net.JoinHostPort(host, getenv("REDIS_PORT", "6379")),
 		Username: os.Getenv("REDIS_USERNAME"),
 		Password: os.Getenv("REDIS_PASSWORD"),
 		DB:       db,
 	})
+}
+
+// newEventBus wires the SSE fan-out from the atoms-middleware Redis Secret
+// contract (REDIS_HOST/PORT/USERNAME/PASSWORD). Redis is a hot path, not the
+// source of truth (ADR-0007): a nil client keeps the in-process MemoryBus,
+// and an unreachable Redis degrades to it without refusing to start —
+// clients still catch up through Postgres replay.
+func newEventBus(client *redis.Client) (eventstream.Bus, string) {
+	if client == nil {
+		return nil, "memory"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
@@ -162,19 +202,12 @@ func newEventBus(db int) (eventstream.Bus, string) {
 // newJobQueue wires the 任务 (Job) Queue. Redis is the production backend
 // (ADR-0007): when REDIS_HOST is set the queue is a Redis Stream, and an
 // unreachable Redis surfaces as an Enqueue error (HTTP 503) rather than a
-// silent fallback to a lossy in-process channel. An empty host keeps the
+// silent fallback to a lossy in-process channel. A nil client keeps the
 // bounded in-process MemoryQueue for local dev and tests.
-func newJobQueue(workers, db int) (jobqueue.Queue, string) {
-	host := os.Getenv("REDIS_HOST")
-	if host == "" {
+func newJobQueue(client *redis.Client, workers int) (jobqueue.Queue, string) {
+	if client == nil {
 		return nil, "memory"
 	}
-	client := redis.NewClient(&redis.Options{
-		Addr:     net.JoinHostPort(host, getenv("REDIS_PORT", "6379")),
-		Username: os.Getenv("REDIS_USERNAME"),
-		Password: os.Getenv("REDIS_PASSWORD"),
-		DB:       db,
-	})
 	return jobqueue.NewRedisQueue(client, jobqueue.WithCapacity(workers*4)), "redis"
 }
 

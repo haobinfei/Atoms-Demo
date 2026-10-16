@@ -74,7 +74,7 @@ func New(backend Backend) *Store {
 	if _, err := rand.Read(seed[:]); err == nil {
 		instance = binary.LittleEndian.Uint64(seed[:])
 	}
-	return &Store{backend: backend, seq: atomic.Int64{}, instance: instance, now: time.Now}
+	return &Store{backend: instrument(backend), seq: atomic.Int64{}, instance: instance, now: time.Now}
 }
 
 // SessionPrefix is the object namespace for a session's official app.

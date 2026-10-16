@@ -28,6 +28,7 @@ import (
 	"github.com/haobinfei/Atoms-Demo/internal/identity"
 	"github.com/haobinfei/Atoms-Demo/internal/jobqueue"
 	"github.com/haobinfei/Atoms-Demo/internal/mailer"
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 	"github.com/haobinfei/Atoms-Demo/internal/pay"
 	"github.com/haobinfei/Atoms-Demo/internal/pipeline"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
@@ -211,10 +212,31 @@ func New(cfg Config) *Server {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+	// 队列积压是抓取时拉取的（observable callback），不起轮询 goroutine：
+	// 抓取间隔就是采样间隔。
+	if err := observability.RegisterQueueDepth("jobs", func(ctx context.Context) (observability.QueueDepth, error) {
+		stats, err := s.queue.Stats(ctx)
+		if err != nil {
+			return observability.QueueDepth{}, err
+		}
+		return observability.QueueDepth{
+			Lag:      int64(stats.Lag),
+			Pending:  int64(stats.Pending),
+			Depth:    int64(stats.Depth),
+			Capacity: int64(stats.Capacity),
+		}, nil
+	}); err != nil {
+		slog.Warn("register queue depth metrics", "err", err)
+	}
 	s.startWorkers(ctx, workers)
 	s.startSweeper(ctx)
 	s.startBuildGC(ctx)
 	return s
+}
+
+// kindAttr labels a 任务 (Job) metric with its kind.
+func kindAttr(kind string) observability.MeasurementOption {
+	return observability.WithString(observability.AttrKind, kind)
 }
 
 // startWorkers launches the Worker pool: each goroutine is a consumer of the
@@ -241,23 +263,35 @@ func (s *Server) startWorkers(ctx context.Context, n int) {
 // session in-process guard drops a concurrent duplicate on this replica, and a
 // store-level 认领租约 (execution lease) drops one across replicas.
 func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
+	obs := observability.Obs()
+	kind := string(job.Kind)
+	// 认领路径上的每次早退都是一次「at-least-once 的正常空转」。分开计数才有
+	// 用：重复投递变多和「真的在跑」是两件完全不同的事，混在一个数里看不出来。
+	skip := func(reason string) error {
+		obs.JobSkipped.Add(ctx, 1, observability.Attrs(
+			observability.AttrKind.String(kind),
+			observability.AttrReason.String(reason),
+		))
+		return nil
+	}
+
 	sess, err := s.store.Load(job.Owner, job.SessionID)
 	if err != nil {
 		// Session deleted while the Job was queued: nothing to do.
-		return nil
+		return skip(observability.ReasonSessionGone)
 	}
 	if sess.Status != "building" {
-		return nil
+		return skip(observability.ReasonNotBuilding)
 	}
 	// A stale Job from an earlier turn/contest/publish must not run against a
 	// session that is now building a different kind of work. Legacy sessions
 	// may have no recorded kind; in that case the lease and status still
 	// serialize execution.
 	if sess.Kind != "" && job.Kind != "" && sess.Kind != string(job.Kind) {
-		return nil
+		return skip(observability.ReasonKindMismatch)
 	}
 	if _, running := s.running.LoadOrStore(job.SessionID, struct{}{}); running {
-		return nil
+		return skip(observability.ReasonDuplicate)
 	}
 	defer s.running.Delete(job.SessionID)
 
@@ -266,16 +300,25 @@ func (s *Server) handleJob(ctx context.Context, job jobqueue.Job) error {
 	// means this delivery is a harmless no-op.
 	ok, err := s.store.ClaimLease(job.Owner, job.SessionID, s.leaseHolder, s.leaseTTL)
 	if err != nil {
+		obs.JobFailed.Add(ctx, 1, kindAttr(kind))
 		return err // leave the Job pending; Redis redelivers it
 	}
 	if !ok {
-		return nil
+		return skip(observability.ReasonLeaseLost)
 	}
 	defer func() { _ = s.store.ReleaseLease(job.Owner, job.SessionID, s.leaseHolder) }()
+
+	// 只有真正占住租约的执行才计入耗时：被跳过的投递是毫秒级的空转，混进来会
+	// 把分位数拉向 0。
+	start := time.Now()
+	defer func() {
+		obs.JobDuration.Record(ctx, time.Since(start).Seconds(), kindAttr(kind))
+	}()
 
 	// Emit the 恢复事件 (recovered event) only after winning the lease, so a
 	// duplicate recovery delivery cannot announce the same recovery twice.
 	if job.Recover {
+		obs.JobRecovered.Add(ctx, 1, kindAttr(kind))
 		s.pipeline.EmitRecovered(job.Owner, job.SessionID, string(job.Kind))
 	}
 
@@ -319,11 +362,14 @@ func (s *Server) startSweeper(ctx context.Context) {
 // enqueuing the same recovery twice; a failed enqueue releases it so the next
 // tick retries instead of stranding the session until the lease expires.
 func (s *Server) sweepOnce(ctx context.Context) {
+	obs := observability.Obs()
 	refs, err := s.store.ListBuilding()
 	if err != nil {
+		obs.RecoverySweeps.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeFailed))
 		slog.Warn("recovery sweep: list building sessions", "err", err)
 		return
 	}
+	obs.RecoverySweeps.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeOK))
 	for _, ref := range refs {
 		ok, err := s.store.ClaimLease(ref.Owner, ref.ID, session.LeasePending, s.leaseTTL)
 		if err != nil {
@@ -340,6 +386,9 @@ func (s *Server) sweepOnce(ctx context.Context) {
 			_ = s.store.ReleaseLease(ref.Owner, ref.ID, session.LeasePending)
 			continue
 		}
+		// 恢复重排队是崩溃恢复的关键信号：这个数与 atoms_job_recovered_total
+		// (真实重跑) 的差值说明有多少恢复请求没能跑起来。
+		obs.RecoveryRequeued.Add(ctx, 1, kindAttr(string(kind)))
 		slog.Info("recovery sweep: re-enqueued building session",
 			"session", ref.ID, "kind", kind)
 	}
@@ -379,11 +428,14 @@ func (s *Server) startBuildGC(ctx context.Context) {
 // policy to each of its build prefixes. It logs what it removed and what it
 // kept, because a sweep that deletes data has to leave a trace.
 func (s *Server) collectBuilds(ctx context.Context) {
+	obs := observability.Obs()
 	ids, err := s.artifacts.SessionIDs(ctx)
 	if err != nil {
+		obs.BuildGCRuns.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeFailed))
 		slog.Warn("build GC: list sessions", "err", err)
 		return
 	}
+	obs.BuildGCRuns.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeOK))
 	removed := 0
 	for _, id := range ids {
 		if ctx.Err() != nil {
@@ -407,6 +459,7 @@ func (s *Server) collectBuilds(ctx context.Context) {
 	if removed > 0 {
 		slog.Info("build GC: done", "sessions", len(ids), "removed", removed)
 	}
+	obs.BuildGCRemoved.Add(ctx, int64(removed))
 }
 
 // Close stops the Worker pool and releases the event bus (and its Redis
@@ -471,13 +524,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pay/orders/{id}/pay", s.handlePayPay)
 	mux.HandleFunc("GET /pay/checkout/{id}", s.handlePayCheckout)
 	mux.HandleFunc("GET /app/{id}/{path...}", s.handleApp)
+	// 抓取端点与业务路由同端口（ADR-0018）：web 侧的 nginx 只代理
+	// ^/(api|app|pay)/，所以它不经公网暴露。identityMiddleware 把它列为公开
+	// 路径——Prometheus 不会带会话 Cookie。
+	mux.HandleFunc("GET "+observability.MetricsPath, func(w http.ResponseWriter, r *http.Request) {
+		observability.Handler().ServeHTTP(w, r)
+	})
 	var handler http.Handler = mux
 	if s.cfg.Identity != nil {
 		handler = s.identityMiddleware(handler)
 	} else if s.cfg.DevAuth {
 		handler = devUserMiddleware(handler, s.cfg.DevUser)
 	}
-	return handler
+	// 观测中间件放在最外层：它必须看到最终状态码，包括中间件产生的 401/403。
+	return observability.Middleware(handler)
 }
 
 // devUserMiddleware injects the development user into every request
@@ -1338,6 +1398,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "generation queue unavailable")
 		return
 	}
+	observability.Obs().SessionsCreated.Add(r.Context(), 1, kindAttr(string(kind)))
 	writeJSON(w, http.StatusOK, map[string]string{"sessionId": sess.ID})
 }
 
@@ -1683,11 +1744,13 @@ func (s *Server) runPublish(ctx context.Context, user, id string) {
 		s.runPublishArtifacts(ctx, user, id)
 		return
 	}
-	s.runPublishLocal(user, id)
+	s.runPublishLocal(ctx, user, id)
 }
 
-func (s *Server) runPublishLocal(user, id string) {
+func (s *Server) runPublishLocal(ctx context.Context, user, id string) {
+	obs := observability.Obs()
 	fail := func(msg string) {
+		obs.Publishes.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeFailed))
 		slog.Error("publish failed", "session", id, "detail", msg)
 		_ = s.store.SetStatus(user, id, "ready")
 		s.pipeline.EmitError(user, id, "发布失败："+msg)
@@ -1797,6 +1860,7 @@ func (s *Server) runPublishLocal(user, id string) {
 		_ = os.RemoveAll(filepath.Join(ws, "published.bak"))
 	}
 	_ = s.store.SetStatus(user, id, "ready")
+	obs.Publishes.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeSuccess))
 	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
 }
 
@@ -1805,7 +1869,9 @@ func (s *Server) runPublishLocal(user, id string) {
 // the previous pointer, preserving the local swap's rollback contract while
 // keeping every replica on the same version.
 func (s *Server) runPublishArtifacts(ctx context.Context, user, id string) {
+	obs := observability.Obs()
 	fail := func(msg string) {
+		obs.Publishes.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeFailed))
 		slog.Error("publish failed", "session", id, "detail", msg)
 		_ = s.store.SetStatus(user, id, "ready")
 		s.pipeline.EmitError(user, id, "发布失败："+msg)
@@ -1897,6 +1963,7 @@ func (s *Server) runPublishArtifacts(ctx context.Context, user, id string) {
 	}
 	_ = os.RemoveAll(tmpDir)
 	_ = s.store.SetStatus(user, id, "ready")
+	obs.Publishes.Add(ctx, 1, observability.WithString(observability.AttrOutcome, observability.OutcomeSuccess))
 	s.pipeline.EmitPublishDone(user, id, pub.Version, pub.URL)
 }
 
@@ -1912,6 +1979,7 @@ func (s *Server) handleGetPublishes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	obs := observability.Obs()
 	id := r.PathValue("id")
 	user := s.requestWorkspaceID(r)
 	after := 0
@@ -1936,6 +2004,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// collapses the subscribe/replay overlap.
 	sub, err := s.bus.Subscribe(ctx, id, after)
 	if err != nil {
+		obs.SSESubscribeFail.Add(ctx, 1)
 		writeError(w, http.StatusInternalServerError, "event stream unavailable")
 		return
 	}
@@ -1970,6 +2039,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Postgres is the source of truth: replay whatever the client missed
 	// (initial history, a dropped Redis entry, or a whole Redis outage).
 	replay := func() {
+		obs.SSEReplays.Add(ctx, 1)
 		events, err := s.store.EventsAfter(user, id, maxSeq)
 		if err != nil {
 			slog.Warn("replay events", "session", id, "after", maxSeq, "err", err)
@@ -1980,6 +2050,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	replay()
+
+	// 长连接连接数是 gauge 而不是耗时直方图的一部分：SSE 请求只结束于客户端
+	// 断开，把它的时长计入 http_request_duration_seconds 会污染分位数。
+	//
+	// 递减用 WithoutCancel：客户端断开时 ctx 已取消，但我们仍要把它计回去。
+	obs.SSEClients.Add(ctx, 1)
+	defer obs.SSEClients.Add(context.WithoutCancel(ctx), -1)
 
 	heartbeatEvery := s.cfg.HeartbeatInterval
 	if heartbeatEvery <= 0 {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
 
@@ -237,6 +238,9 @@ func (b *FanoutBus) Publish(ctx context.Context, sessionID string, ev session.Ev
 	_ = b.memory.Publish(ctx, sessionID, ev)
 	if b.redis != nil {
 		if err := b.redis.Publish(ctx, sessionID, ev); err != nil {
+			// Redis 热路径失败不改语义（事件已落 Postgres），但它是「实时性降级」
+			// 的唯一信号：这个数一涨，SSE 就开始靠回放兜底了。
+			observability.Obs().EventPublishFail.Add(ctx, 1)
 			slog.Warn("redis event publish", "session", sessionID, "err", err)
 		}
 	}

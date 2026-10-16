@@ -31,6 +31,10 @@ func (q *holdPublishQueue) Run(ctx context.Context, id string, h jobqueue.Handle
 
 func (q *holdPublishQueue) Close() error { return q.inner.Close() }
 
+func (q *holdPublishQueue) Stats(ctx context.Context) (jobqueue.Stats, error) {
+	return q.inner.Stats(ctx)
+}
+
 // TestPublishClaimsSessionWhileQueued: POST /publish returns immediately (202)
 // and the session is claimed for the duration, so a chat request mid-publish
 // is a 409 and no version is recorded until the Worker runs.
