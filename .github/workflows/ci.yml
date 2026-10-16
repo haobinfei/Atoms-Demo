@@ -35,6 +35,14 @@ jobs:
         working-directory: web
 
   e2e:
+    # 每个 PR 只跑一次。push 到 main 会再触发一次完整 CI，而 squash 合并后 main
+    # 的代码树与被测 PR 完全相同——重跑一遍不产生新信息，只多一次 8 分钟等待，
+    # 还把 flake 面翻倍（main 上偶发失败到底是代码坏了还是测试抖了，反而说不清）。
+    #
+    # main 上仍然保留：go vet + go test -race、web build，以及 release.yml 的镜像
+    # 构建——镜像构建这一环今天正是先在 main 上暴露了 go.mod 的工具链问题，
+    # 比打 tag 早了半小时。哨兵不能拆，只拆重复的那一份。
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
