@@ -95,3 +95,23 @@ Redis 满了还是 Postgres 慢""模型链是不是在减员"都只能靠人猜�
   VictoriaMetrics（uid `victoriametrics`），看板查询按此编写。
 - 队列与事件扇出现在共用一个 Redis 客户端（`RedisQueue.Close` 本就是 no-op，正是为了
   让调用方持有连接）：少一份连接，也少一个连接池要监控。
+
+> **修订（2026-10-16，v0.6.2）：埋点要落在所有调用方共用的实例上，而不是某一条
+> 调用路径上。**
+>
+> 生成引擎的调用埋点原先落在 `provider.Chain` 的 `generateWithRetry` 里，只覆盖回合。
+> 实跑一次竞赛后发现 `atoms_provider_*` 一条都没有——竞赛的参赛者是被
+> `runContestant` 直接调用的（`comp.Generate(...)`，绕过 chain），评审打分同理。
+> 改为把埋点下沉到 `provider.Instrument` 包装器，装在**每个 Provider 实例**上
+> （`ChainFromEnv` 的每个成员，以及 `server.New` 注入的 `Competitors`）：回合、竞赛、
+> 评审打分三条路一次覆盖，模板 provider（测试与 e2e 夹具）同样被覆盖；`Chain` 只保留
+> 链特有的降级计数。包装器不改变 Provider 契约——产物不合规时仍原样返回，由调用方校验。
+>
+> 两条通用教训：
+>
+> 1. **盲区只有真实流量能发现。** 这一条单测覆盖不到，是用户跑了一次竞赛才暴露的。
+>    回归测试 `TestContestContributesProviderMetrics` 刻意绕开 chain，断言每个参赛者
+>    的调用指标都出现；撤掉包装它即失败。
+> 2. **只在异常时递增的计数器，没有异常时连序列都不存在**，面板显示空白。这是正确的
+>    语义（空白 = 没发生），因此**不用 `or vector(0)` 造假零点**——那会让"健康"看起来
+>    像一条真实数据。改为把「空=没有发生」写进面板标题，让它永远可见、不必悬停。
