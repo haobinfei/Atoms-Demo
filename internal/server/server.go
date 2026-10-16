@@ -155,8 +155,18 @@ func New(cfg Config) *Server {
 		bus = eventstream.NewMemoryBus()
 	}
 	prov := cfg.Prov
-	if prov == nil {
+	switch {
+	case prov == nil:
+		// ChainFromEnv 已把每个成员包成 Instrumented。
 		prov = provider.ChainFromEnv(context.Background(), cfg.Env)
+	default:
+		if _, isChain := prov.(provider.Chain); !isChain {
+			// 直接注入的单个 生成引擎（测试夹具、e2e）同样要计量。
+			prov = provider.Instrument(prov)
+		}
+	}
+	if len(cfg.Competitors) > 0 {
+		cfg.Competitors = provider.InstrumentAll(cfg.Competitors)
 	}
 	workers := cfg.QueueWorkers
 	if workers <= 0 {

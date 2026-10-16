@@ -174,6 +174,11 @@ func ChainFromEnv(ctx context.Context, cfg EnvConfig) Provider {
 			slog.Warn("local llm probe failed, skipping", "base_url", cfg.LocalBaseURL, "err", err)
 		}
 	}
+	// 每个成员都被 Instrumented 包装：回合（经 Chain）、竞赛（runContestant
+	// 直接调用成员）、评审打分（scoreWithLLM）三条路因此共用同一套调用指标。
+	for i, p := range chain {
+		chain[i] = Instrument(p)
+	}
 	return Chain{Providers: chain}
 }
 
