@@ -69,6 +69,9 @@ jobs:
       # 复用上一轮构建好的 SPA。dist 里没有环境相关的内容：vite.config.ts 的
       # ATOMS_API 只是运行时代理目标（process.env），不会内联进 bundle，所以
       # 缓存命中时 playwright.config 会跳过 npm run build。
+      # 实测只省约 14 秒（vite 构建本身只要 20-30 秒，webServer 启动的大头是
+      # `go run ./e2e/server.go` 的编译与就绪轮询）——留着是因为它几乎零成本，
+      # 而不是指望它带来分钟级收益。
       # key 覆盖全部构建输入，源码或依赖一变即失效。
       - name: Restore built SPA
         uses: actions/cache@v4
