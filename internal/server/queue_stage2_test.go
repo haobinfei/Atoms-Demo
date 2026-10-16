@@ -38,6 +38,8 @@ func (q *gatedQueue) Run(ctx context.Context, workerID string, handle jobqueue.H
 
 func (q *gatedQueue) Close() error { return q.inner.Close() }
 
+func (q *gatedQueue) Stats(ctx context.Context) (jobqueue.Stats, error) { return q.inner.Stats(ctx) }
+
 // newTestServerWithQueue wires a specific Queue into the server and closes it
 // (stopping the Worker pool) at test cleanup.
 func newTestServerWithQueue(t *testing.T, prov provider.Provider, q jobqueue.Queue) *httptest.Server {

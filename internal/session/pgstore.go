@@ -46,6 +46,10 @@ func NewPGStore(dir, dsn string) (*PGStore, error) {
 // Close releases the pool; mostly for tests.
 func (p *PGStore) Close() { p.pool.Close() }
 
+// PoolStats exposes a connection-pool snapshot for the metrics adapter. It is a
+// method value, so callers pass it straight to observability.RegisterDBPool.
+func (p *PGStore) PoolStats() *pgxpool.Stat { return p.pool.Stat() }
+
 func (p *PGStore) Dir() string { return p.dir }
 
 func (p *PGStore) Workspace(owner, id string) string {

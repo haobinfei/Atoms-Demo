@@ -5,14 +5,17 @@
 package builder
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/evanw/esbuild/pkg/api"
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 )
 
@@ -35,7 +38,25 @@ var (
 
 // Build bundles appDir/src/main.tsx into distDir (main.js + main.css) and
 // rewrites the app's index.html to load them.
+//
+// 它是 build 的计时与计数外壳：耗时与结果在这里记一次，自愈细节记在内部。
 func (b *Builder) Build(appDir, distDir string) error {
+	start := time.Now()
+	err := b.build(appDir, distDir)
+	outcome := observability.OutcomeSuccess
+	if err != nil {
+		outcome = observability.OutcomeFailed
+	}
+	// Build 没有 context 参数（调用方是 pipeline 与发布流程），指标记录不需要
+	// 取消语义，用 Background 即可。
+	ctx := context.Background()
+	obs := observability.Obs()
+	obs.BuildRuns.Add(ctx, 1, observability.WithString(observability.AttrOutcome, outcome))
+	obs.BuildDuration.Record(ctx, time.Since(start).Seconds(), observability.WithString(observability.AttrOutcome, outcome))
+	return err
+}
+
+func (b *Builder) build(appDir, distDir string) error {
 	// esbuild requires an absolute working directory; the server's default
 	// workspace dir is relative ("workspace").
 	abs, err := filepath.Abs(appDir)
@@ -72,6 +93,7 @@ func (b *Builder) Build(appDir, distDir string) error {
 	// only part of the unresolved-import graph per pass, so stub every
 	// reported .css and rebuild, a few rounds, until the build is clean or
 	// something real is missing (a non-CSS import cannot be stubbed away).
+	stubbed := 0
 	for round := 0; len(result.Errors) > 0 && round < 4; round++ {
 		stubs, ok := missingCSS(result.Errors, appDir)
 		if !ok {
@@ -82,9 +104,16 @@ func (b *Builder) Build(appDir, distDir string) error {
 				return fmt.Errorf("build failed: %s", joinErrors(result.Errors))
 			}
 		}
+		stubbed += len(stubs)
+		observability.Obs().BuildCSSStubs.Add(context.Background(), int64(len(stubs)))
 		result = api.Build(options())
 	}
 	if len(result.Errors) > 0 {
+		if stubbed > 0 {
+			// 自愈跑过但没救回来：模型漏的东西不只是 CSS。这一类失败要单独看得见，
+			// 否则会淹没在普通构建失败里。
+			observability.Obs().BuildSelfHealExhausted.Add(context.Background(), 1)
+		}
 		return fmt.Errorf("build failed: %s", joinErrors(result.Errors))
 	}
 

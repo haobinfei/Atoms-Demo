@@ -37,12 +37,30 @@ type Job struct {
 // acknowledges it.
 type Handler func(ctx context.Context, job Job) error
 
+// Stats 是队列在某一刻的积压快照，供 /metrics 抓取时读取（observable
+// callback，不需要后台轮询 goroutine）。
+type Stats struct {
+	// Lag 是尚未投递给消费者组的条目数：真正「排队等活」的部分。
+	Lag int
+	// Pending 是已投递但未确认的条目数：Worker 手上的活，含崩溃后等待重投的。
+	//
+	// Lag 与 Pending 对应完全不同的故障：Lag 涨说明 Worker 不够或吞吐掉了；
+	// Pending 涨说明执行慢或 Worker 在崩（at-least-once 的堆积）。
+	Pending int
+	// Depth 是队列中的条目总数，Capacity 是容量上限。
+	Depth    int
+	Capacity int
+}
+
 // Queue is the 队列 contract. Enqueue never blocks on a full queue: a full or
 // closed queue is a hard error the caller surfaces as 503 rather than a
 // silent drop. Run blocks draining until ctx is cancelled or the queue closes.
 type Queue interface {
 	Enqueue(ctx context.Context, job Job) error
 	Run(ctx context.Context, workerID string, handle Handler) error
+	// Stats reports the current backlog. It is read-only and may be called from
+	// a metrics scrape; implementations must not block on it.
+	Stats(ctx context.Context) (Stats, error)
 	Close() error
 }
 

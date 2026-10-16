@@ -17,6 +17,7 @@ import (
 	"github.com/haobinfei/Atoms-Demo/internal/builder"
 	"github.com/haobinfei/Atoms-Demo/internal/changes"
 	"github.com/haobinfei/Atoms-Demo/internal/eventstream"
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 	"github.com/haobinfei/Atoms-Demo/internal/provider"
 	"github.com/haobinfei/Atoms-Demo/internal/session"
 )
@@ -282,7 +283,11 @@ var stageHints = map[string]string{
 
 // Run executes the full agent sequence for the session's current prompt.
 func (p *Pipeline) Run(ctx context.Context, owner, id string) {
+	obs := observability.Obs()
 	fail := func(stage string, err error) {
+		// 失败阶段是排障的第一手信息：它把「模型不可用」和「生成的代码编译不过」
+		// 分开，两者的处置完全不同。
+		obs.TurnStageFailed.Add(ctx, 1, observability.WithString(observability.AttrStage, stage))
 		payload := map[string]any{"message": err.Error(), "stage": stage}
 		if hint, ok := stageHints[stage]; ok {
 			payload["hint"] = hint
@@ -291,6 +296,7 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 	}
 	out, stage, err := p.run(ctx, owner, id)
 	if errors.Is(err, errCanceled) {
+		obs.TurnFinished.Add(ctx, 1, observability.WithString(observability.AttrStatus, observability.OutcomeCanceled))
 		p.finishCanceled(owner, id)
 		return
 	}
@@ -326,6 +332,7 @@ func (p *Pipeline) Run(ctx context.Context, owner, id string) {
 			}
 		}
 	}
+	obs.TurnFinished.Add(ctx, 1, observability.WithString(observability.AttrStatus, status))
 	p.setStatus(owner, id, status)
 	// The summary lands before "done" so that a client that has seen done
 	// can rely on all session writes being complete (tests clean up

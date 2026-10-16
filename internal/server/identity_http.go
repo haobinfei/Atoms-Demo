@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/haobinfei/Atoms-Demo/internal/identity"
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 )
 
 const sessionCookie = "atoms_session"
@@ -48,7 +49,10 @@ func (s *Server) identityMiddleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		public := r.URL.Path == "/api/health" || strings.HasPrefix(r.URL.Path, "/api/auth/register") ||
+		// Prometheus 抓取不带会话 Cookie，所以 /metrics 必须是公开路径
+		// （ADR-0018）。它同时被观测中间件排除在埋点之外。
+		public := r.URL.Path == observability.MetricsPath ||
+			r.URL.Path == "/api/health" || strings.HasPrefix(r.URL.Path, "/api/auth/register") ||
 			r.URL.Path == "/api/auth/verify" || r.URL.Path == "/api/auth/login" ||
 			r.URL.Path == "/api/auth/resend-verification" || r.URL.Path == "/api/auth/forgot-password" ||
 			r.URL.Path == "/api/auth/reset-password" || strings.HasPrefix(r.URL.Path, "/app/") ||
@@ -173,11 +177,21 @@ func (s *Server) allowAuth(w http.ResponseWriter, r *http.Request, kind, value s
 	key := sha256.Sum256([]byte(kind + "|" + r.URL.Path + "|" + value))
 	allowed, err := s.cfg.Identity.AllowAuthAttempt(r.Context(), hex.EncodeToString(key[:]), 600, 20)
 	if err != nil {
+		// 限流存储不可用被当成拒绝：这条必须能看见，否则「登录突然全挂」会被
+		// 误判成用户忘记密码。
+		observability.Obs().AuthRateLimited.Add(r.Context(), 1, observability.Attrs(
+			observability.AttrScope.String(kind),
+			observability.AttrOutcome.String(observability.OutcomeUnavailable),
+		))
 		slog.Error("authentication rate limit unavailable", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "try again later")
 		return false
 	}
 	if !allowed {
+		observability.Obs().AuthRateLimited.Add(r.Context(), 1, observability.Attrs(
+			observability.AttrScope.String(kind),
+			observability.AttrOutcome.String(observability.OutcomeExceeded),
+		))
 		writeError(w, http.StatusTooManyRequests, "try again later")
 		return false
 	}

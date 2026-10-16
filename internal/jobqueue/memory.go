@@ -3,6 +3,8 @@ package jobqueue
 import (
 	"context"
 	"sync"
+
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 )
 
 // MemoryQueue is the bounded in-process 队列 for tests and Redis-less local
@@ -24,16 +26,20 @@ func NewMemoryQueue(capacity int) *MemoryQueue {
 	return &MemoryQueue{ch: make(chan Job, capacity)}
 }
 
-func (q *MemoryQueue) Enqueue(_ context.Context, job Job) error {
+func (q *MemoryQueue) Enqueue(ctx context.Context, job Job) error {
+	obs := observability.Obs()
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	if q.closed {
+		obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeClosed))
 		return ErrQueueClosed
 	}
 	select {
 	case q.ch <- job:
+		obs.JobEnqueued.Add(ctx, 1, kindAttr(job.Kind))
 		return nil
 	default:
+		obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeFull))
 		return ErrQueueFull
 	}
 }
@@ -41,6 +47,7 @@ func (q *MemoryQueue) Enqueue(_ context.Context, job Job) error {
 // Run drains the shared channel. Multiple Run goroutines form the Worker pool:
 // each Job is delivered to exactly one of them.
 func (q *MemoryQueue) Run(ctx context.Context, _ string, handle Handler) error {
+	obs := observability.Obs()
 	for {
 		select {
 		case <-ctx.Done():
@@ -49,9 +56,20 @@ func (q *MemoryQueue) Run(ctx context.Context, _ string, handle Handler) error {
 			if !ok {
 				return nil
 			}
-			_ = handle(ctx, job)
+			obs.JobDelivered.Add(ctx, 1, kindAttr(job.Kind))
+			if err := handle(ctx, job); err != nil {
+				obs.JobRedelivered.Add(ctx, 1, failAttrs(job.Kind, observability.ReasonHandlerError))
+				continue
+			}
+			obs.JobAcknowledged.Add(ctx, 1, kindAttr(job.Kind))
 		}
 	}
+}
+
+// Stats reports the buffered backlog. There is no PEL in-process, so nothing is
+// ever "delivered but unacknowledged": Lag and Depth are the same number.
+func (q *MemoryQueue) Stats(context.Context) (Stats, error) {
+	return Stats{Lag: len(q.ch), Depth: len(q.ch), Capacity: cap(q.ch)}, nil
 }
 
 // Close is idempotent. Enqueue after Close returns ErrQueueClosed; Run drains

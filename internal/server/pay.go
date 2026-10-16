@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 	"github.com/haobinfei/Atoms-Demo/internal/pay"
 )
 
@@ -86,9 +87,11 @@ func (s *Server) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	order, err := s.payStore.Create(dir, req.App, req.Items)
 	if err != nil {
+		observability.Obs().PayOrders.Add(r.Context(), 1, observability.WithString(observability.AttrOutcome, observability.OutcomeFailed))
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	observability.Obs().PayOrders.Add(r.Context(), 1, observability.WithString(observability.AttrOutcome, observability.OutcomeOK))
 	writeJSON(w, http.StatusOK, order)
 }
 
@@ -148,9 +151,13 @@ func (s *Server) handlePayPay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// 错卡号 / 重复支付 / 订单不存在都已经有各自的 4xx 分支，这里只记真正
+		// 的内部错误——把用户输错卡号算进错误率会把告警淹掉。
+		observability.Obs().PayOrders.Add(r.Context(), 1, observability.WithString(observability.AttrOutcome, observability.OutcomeFailed))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	observability.Obs().PayOrders.Add(r.Context(), 1, observability.WithString(observability.AttrOutcome, observability.OutcomeSuccess))
 	writeJSON(w, http.StatusOK, order)
 }
 

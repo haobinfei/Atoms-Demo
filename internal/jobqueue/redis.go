@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/haobinfei/Atoms-Demo/internal/observability"
 )
 
 // Default stream/group names for the shared 队列.
@@ -99,30 +101,72 @@ return redis.call('XADD', KEYS[1], '*', 'job', ARGV[2])
 // (wrapped connection error) is returned to the caller, which answers 503 —
 // the queue never silently falls back to a lossy in-process channel.
 func (q *RedisQueue) Enqueue(ctx context.Context, job Job) error {
+	obs := observability.Obs()
 	if q == nil || q.client == nil {
+		obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeUnavailable))
 		return errors.New("jobqueue: redis client is nil")
 	}
 	payload, err := json.Marshal(job)
 	if err != nil {
+		obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeInvalid))
 		return err
 	}
 	res, err := enqueueScript.Run(ctx, q.client, []string{q.stream}, q.capacity, payload).Result()
 	if err != nil {
+		// Redis 不可用：这是 503 的来源，必须能看见。
+		obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeUnavailable))
 		return err
 	}
 	switch v := res.(type) {
 	case int64:
 		if v == 0 {
+			obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeFull))
 			return ErrQueueFull
 		}
 	case string:
 		if v == "" {
+			obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeFull))
 			return ErrQueueFull
 		}
 	default:
+		obs.JobEnqueueFail.Add(ctx, 1, failAttrs(job.Kind, observability.OutcomeInvalid))
 		return fmt.Errorf("jobqueue: unexpected enqueue reply %T", res)
 	}
+	obs.JobEnqueued.Add(ctx, 1, kindAttr(job.Kind))
 	return nil
+}
+
+// Stats reports the current backlog. Lag comes from the consumer group's
+// undelivered count, Pending from the PEL: they answer different questions
+// (Workers too few vs. execution too slow or crashing).
+func (q *RedisQueue) Stats(ctx context.Context) (Stats, error) {
+	if q == nil || q.client == nil {
+		return Stats{}, errors.New("jobqueue: redis client is nil")
+	}
+	depth, err := q.client.XLen(ctx, q.stream).Result()
+	if err != nil {
+		return Stats{}, err
+	}
+	stats := Stats{Depth: int(depth), Capacity: q.capacity}
+	if depth == 0 {
+		// An empty stream has no lag and no pending entries; skip XINFO, which
+		// errors on a stream that does not exist yet.
+		return stats, nil
+	}
+	groups, err := q.client.XInfoGroups(ctx, q.stream).Result()
+	if err != nil {
+		return Stats{}, err
+	}
+	for _, group := range groups {
+		if group.Name != q.group {
+			continue
+		}
+		if group.Lag >= 0 {
+			stats.Lag = int(group.Lag)
+		}
+		stats.Pending = int(group.Pending)
+	}
+	return stats, nil
 }
 
 // Run consumes Jobs as the named consumer until ctx is cancelled. A Redis that
@@ -200,6 +244,7 @@ func (q *RedisQueue) Run(ctx context.Context, workerID string, handle Handler) e
 // failed handler leaves the entry pending for redelivery; a malformed entry is
 // acked and dropped so it cannot poison the stream forever.
 func (q *RedisQueue) process(ctx context.Context, msgs []redis.XMessage, handle Handler) {
+	obs := observability.Obs()
 	for _, msg := range msgs {
 		if ctx.Err() != nil {
 			return
@@ -207,15 +252,32 @@ func (q *RedisQueue) process(ctx context.Context, msgs []redis.XMessage, handle 
 		job, ok := decodeJob(msg.Values["job"])
 		if !ok {
 			slog.Warn("jobqueue: dropping malformed job", "id", msg.ID)
+			obs.JobRedelivered.Add(ctx, 1, observability.WithString(observability.AttrReason, observability.ReasonMalformed))
 			q.ack(ctx, msg.ID)
 			continue
 		}
+		obs.JobDelivered.Add(ctx, 1, kindAttr(job.Kind))
 		if err := handle(ctx, job); err != nil {
 			slog.Warn("jobqueue: handler failed; leaving pending", "id", msg.ID, "kind", job.Kind, "err", err)
+			obs.JobRedelivered.Add(ctx, 1, failAttrs(job.Kind, observability.ReasonHandlerError))
 			continue
 		}
+		obs.JobAcknowledged.Add(ctx, 1, kindAttr(job.Kind))
 		q.ack(ctx, msg.ID)
 	}
+}
+
+// kindAttr is the one-label option every 任务 (Job) metric carries.
+func kindAttr(kind Kind) observability.MeasurementOption {
+	return observability.WithString(observability.AttrKind, string(kind))
+}
+
+// failAttrs labels a failed 任务 (Job) with its kind and a bounded reason.
+func failAttrs(kind Kind, reason string) observability.MeasurementOption {
+	return observability.Attrs(
+		observability.AttrKind.String(string(kind)),
+		observability.AttrReason.String(reason),
+	)
 }
 
 func (q *RedisQueue) ack(ctx context.Context, id string) {
