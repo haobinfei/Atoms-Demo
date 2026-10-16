@@ -65,6 +65,9 @@ cd web && npm install && npm run dev
 | `KIMI_API_KEY` / `KIMI_BASE_URL` / `KIMI_MODEL` | 空 / 官方默认值 | Kimi 生成引擎（可选） |
 | `LOCAL_LLM_BASE_URL` | `http://192.168.1.101:8090/v1` | 本地 gemma（llama.cpp OpenAI 兼容） |
 | `LOCAL_LLM_MODEL` | 空 | 本地模型名 |
+| `OTEL_SERVICE_NAME` | `atoms-demo-server` | 指标与 span 上的服务名（`/metrics` 的 `job` 标签） |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 空 | traces 上报地址（OTLP gRPC，如 `http://tempo.tracing.svc:4317`）。**留空 = 追踪关闭**（noop，零网络开销），指标照常暴露 |
+| `OTEL_TRACES_SAMPLER_ARG` | `0.1` | 追踪的头部采样率 0~1；开启追踪前先确认它，否则错误链路大概率采不到 |
 | `ATOMS_API`（前端） | `http://localhost:4173` | vite 代理目标 |
 
 公开认证端点按客户端 IP 和邮箱（仅保存摘要）双重限流，计数写入 Postgres，多个 API 副本共享。
@@ -116,3 +119,37 @@ Docker 与 GitOps（Argo CD + Helm，push 后自动拉起）见平级仓库
 Dockerfile（server / web）与 `.env.example`。
 
 生产多副本前需满足两点：`atoms-demo-env` Secret 包含全部 `COS_*` 键；app 源码工作区必须是所有副本可共同访问的存储（共享 RWX PV，或后续把源码也迁入对象存储）。COS 迁移只解除构建产物对 Pod 本地 `dist` 的依赖。
+
+## 监控
+
+服务端在业务端口上暴露 Prometheus 指标的 `/metrics`（ADR-0018），本地起服务后即可查看：
+
+```bash
+curl -s http://localhost:4173/metrics | head
+```
+
+抓取与看板由平级仓库 `atoms-demo-gitops` 的 chart 负责，两个开关默认开启：
+`monitoring.serviceMonitor` 建 ServiceMonitor（**必须带 `release: monitoring` 标签**，
+那是平台 Prometheus 的选择器，漏了会出现"端点通了但没数据"），
+`monitoring.dashboard` 下发 Grafana 看板 ConfigMap。集群 Prometheus 抓取后 remoteWrite
+进 VictoriaMetrics，Grafana 的默认数据源即 VM（uid `victoriametrics`），看板按此编写。
+
+指标分四组：
+
+| 组 | 指标 |
+|---|---|
+| HTTP | `http_server_request_duration_seconds{http_request_method,http_response_status_code,http_route}`；路由标签取路由模板，事件流路由不进此指标，改用 `atoms_sse_clients_active` |
+| 队列与任务 | `atoms_job_queue_{lag,pending,depth,capacity}`、`atoms_job_{enqueued,enqueue_failed,delivered,acknowledged,redelivered,skipped,failed,recovered}_total`、`atoms_job_duration_seconds` |
+| 生成 | `atoms_turn_{finished,stage_failed}_total`、`atoms_provider_{attempts,fallback}_total`、`atoms_provider_duration_seconds`、`atoms_build_{runs_total,duration_seconds,css_stubs_total,selfheal_exhausted_total}` |
+| 依赖与业务 | `atoms_db_pool_*`、`atoms_redis_pool_*`、`atoms_artifact_operations_total`、`atoms_sessions_created_total`、`atoms_publishes_total`、`atoms_pay_orders_total`、`atoms_auth_rate_limited_total` |
+
+标签里**不含**任何租户、会话或账号标识（`ADR-0018` 第 4 条），所有标签取值都是有界枚举。
+排障入口按问题选：任务积压看 `atoms_job_queue_lag`（Worker 不够/吞吐掉了）与
+`atoms_job_queue_pending`（执行慢或 Worker 在崩）；实时性变差看 `atoms_sse_replays_total`
+与 `atoms_event_publish_failed_total`；模型链在减员看 `atoms_provider_fallback_total`；
+崩溃恢复是否真的重跑看 `atoms_recovery_requeued_total` 与 `atoms_job_recovered_total`
+的差值。
+
+追踪默认关闭。设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 即开启（注意当前是头部采样，
+`OTEL_TRACES_SAMPLER_ARG` 默认 0.1，错误链路大概率采不到——生产上真正需要的是
+collector 侧的尾采样）。
