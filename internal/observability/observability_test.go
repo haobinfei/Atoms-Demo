@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -236,6 +238,46 @@ func TestNoTenantLabelsAnywhere(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestExemplarsDoNotFloodLogs 守住一次真实事故：traces 关闭时 exemplar 没有可
+// 关联的 trace id，而 view 的 AttributeFilter 对 exemplar 不生效（OTel 规定
+// exemplar 仍携带被过滤掉的属性），于是标签集超 128 runes、每次采集刷一行警告。
+// 线上曾因此把日志刷成 100% 噪音，真实错误完全看不见。
+func TestExemplarsDoNotFloodLogs(t *testing.T) {
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(restore)
+
+	shutdown, err := Setup(context.Background())
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	mux := http.NewServeMux()
+	// 故意用一条长路由：exemplar 的标签集正是被它顶过 128 runes 的。
+	mux.HandleFunc("GET /api/sessions/{id}/contestants/{cid}/preview/versions/{vid}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := Middleware(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/3f2b1c9e7d6a5b4c3d2e1f00/contestants/deepseek/preview/versions/9", nil)
+	// 关键：入口网关注入的 traceparent（sampled 位 = 01）。noop tracer 会保留这个
+	// 远端 SpanContext，于是 trace-based exemplar 过滤器判定"已采样"并真的产生
+	// exemplar——即使 traces 根本没上报。缺了这个头就复现不出来。
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	h.ServeHTTP(rec, req)
+
+	// 触发若干次采集
+	for i := 0; i < 3; i++ {
+		gather(t)
+	}
+	if strings.Contains(buf.String(), "exemplar") {
+		t.Errorf("采集产生了 exemplar 相关日志（会把日志刷成噪音）：\n%s", buf.String())
 	}
 }
 

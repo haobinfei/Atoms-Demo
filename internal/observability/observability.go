@@ -34,6 +34,7 @@ import (
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
@@ -95,11 +96,24 @@ func Setup(ctx context.Context) (func(context.Context) error, error) {
 		return nil, fmt.Errorf("init prometheus exporter: %w", err)
 	}
 
-	mp := sdkmetric.NewMeterProvider(
+	mpOpts := []sdkmetric.Option{
 		sdkmetric.WithReader(exp),
 		sdkmetric.WithResource(res),
 		sdkmetric.WithView(views()...),
-	)
+	}
+	if os.Getenv(otlpEndpointEnv) == "" {
+		// traces 关闭时 exemplar 没有可关联的 trace id，留着它只有代价：
+		//
+		//  1. view 的 AttributeFilter 对 exemplar 不生效——OTel 明确规定 exemplar
+		//     仍携带被 view 过滤掉的属性，于是标签集又变长；
+		//  2. Prometheus 文本格式限制标签集 128 runes，超限就丢弃 exemplar 并打
+		//     一行警告。实测线上因此把日志刷成了 100% 噪音（每条直方图序列每次
+		//     采集都一行），真实错误完全看不见。
+		//
+		// 等 OTEL_EXPORTER_OTLP_ENDPOINT 打开、真正有 trace 可关联时再启用。
+		mpOpts = append(mpOpts, sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter))
+	}
+	mp := sdkmetric.NewMeterProvider(mpOpts...)
 	otel.SetMeterProvider(mp)
 
 	// 注入侧发多头格式的 b3，sidecar 也能提取；同时保留 W3C 与 Baggage，供
