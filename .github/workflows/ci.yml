@@ -13,6 +13,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+      # Dockerfile.server 构建在 golang:1.25-alpine 上，该镜像设 GOTOOLCHAIN=local
+      # （拒绝自动下载更新的工具链）。而这里的 setup-go 默认 GOTOOLCHAIN=auto，
+      # 会自动拉新版工具链——于是「go.mod 要求 go >= 1.26」能过 CI 却让镜像构建失败
+      # （v0.6.0 就这么挂过）。用 local 语义复现镜像的约束，让它在这里就红。
+      - name: Reject deps requiring a newer Go than the image
+        run: GOTOOLCHAIN=local go mod download
       - run: go vet ./...
       - run: go test -race ./...
 
